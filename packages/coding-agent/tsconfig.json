@@ -8,6 +8,7 @@
 			"#completion/*": ["./src/completion/*"],
 			"#credentials/*": ["./src/credentials/*"],
 			"#host/*": ["./src/host/*"],
+			"#hooks/*": ["./src/hooks/*"],
 			"#maintenance/*": ["./src/maintenance/*"],
 			"#mcp/*": ["./src/mcp/*"],
 			"#media/*": ["./src/media/*"],

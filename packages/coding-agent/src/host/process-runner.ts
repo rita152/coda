@@ -8,6 +8,8 @@ export interface ProcessRunRequest {
 	readonly maxOutputBytes: number;
 	readonly maxOutputLines: number;
 	readonly overflowPath?: string;
+	/** Optional complete stdin payload. The runner closes stdin after writing it. */
+	readonly stdin?: string | Uint8Array;
 	/** Observes decoded output in the order Node receives data from the two pipes. */
 	readonly onOutput?: (chunk: ProcessOutputChunk) => void;
 }

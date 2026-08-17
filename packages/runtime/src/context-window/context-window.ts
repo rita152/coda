@@ -41,6 +41,8 @@ export interface ContextWindowControllerOptions {
 	readonly commit: (checkpoint: CompactionCheckpoint) => Promise<void>;
 	readonly checkpoint?: CompactionCheckpoint;
 	readonly maxOutputTokens?: number;
+	readonly beforeCompact?: (request: CompactContextRequest) => Promise<void> | void;
+	readonly afterCompact?: (checkpoint: CompactionCheckpoint, request: CompactContextRequest) => Promise<void> | void;
 }
 
 export interface CompactContextRequest {
@@ -166,6 +168,7 @@ export class ContextWindowController {
 
 	async #compact(request: CompactContextRequest): Promise<CompactionCheckpoint> {
 		if (request.messages.length === 0) throw new Error("There is no conversation context to compact");
+		await this.#options.beforeCompact?.(request);
 		const runtime = this.#options.runtime();
 		const active = this.project(request.messages);
 		const { head, tail } = splitForCompaction(active, runtime.model);
@@ -242,6 +245,7 @@ export class ContextWindowController {
 		// Durability is the commit point: a failed append leaves the old projection active.
 		await this.#options.commit(checkpoint);
 		this.#checkpoint = structuredClone(checkpoint);
+		await this.#options.afterCompact?.(structuredClone(checkpoint), request);
 		return structuredClone(checkpoint);
 	}
 

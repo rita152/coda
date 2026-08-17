@@ -35,6 +35,7 @@ import {
 } from "./app/workspace-session.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
+import { CommandLifecycleHookHost, hookReviewText, inspectHookConfiguration, trustAllHooks } from "./hooks/index.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import type { FileSystem } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
@@ -312,6 +313,49 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							);
 						}
 					}
+					let hookConfiguration = await inspectHookConfiguration({
+						workspace: workspace.root,
+						homeDirectory: options.runtime.homeDirectory,
+						fileSystem: options.fileSystem,
+						trust: settings.hookTrust ?? [],
+					});
+					for (const diagnostic of hookConfiguration.diagnostics) {
+						await maintenanceDiagnostics({
+							code: diagnostic.code,
+							message: `${diagnostic.message}${diagnostic.path ? ` (${diagnostic.path})` : ""}`,
+						});
+					}
+					const untrustedHooks = hookConfiguration.handlers.filter(({ trust }) => trust === "untrusted");
+					if (untrustedHooks.length > 0) {
+						const trustedInteractively =
+							!parsed.trustHooks && interactiveRuntime
+								? await confirmFromTerminal(interactiveRuntime, hookReviewText(hookConfiguration))
+								: false;
+						if (parsed.trustHooks || trustedInteractively) {
+							settings = trustAllHooks(settings, hookConfiguration);
+							await options.settings.save(settings);
+							hookConfiguration = await inspectHookConfiguration({
+								workspace: workspace.root,
+								homeDirectory: options.runtime.homeDirectory,
+								fileSystem: options.fileSystem,
+								trust: settings.hookTrust ?? [],
+							});
+						} else if (!interactiveRuntime) {
+							await options.io.stderr.write(
+								`coda: ${untrustedHooks.length} untrusted Hook handler${untrustedHooks.length === 1 ? " was" : "s were"} omitted; pass --trust-hooks after review\n`,
+							);
+						}
+					}
+					const configuredShell = options.runtime.environment.SHELL;
+					const lifecycleHooks = new CommandLifecycleHookHost({
+						configuration: hookConfiguration,
+						processRunner: options.processRunner,
+						shellExecutable: configuredShell?.startsWith("/") ? configuredShell : "/bin/sh",
+						platform: options.runtime.platform,
+						environment: options.runtime.environment,
+						diagnostic: maintenanceDiagnostics,
+					});
+					workspaceResources.useLifecycleHooks(lifecycleHooks);
 					const settingsState = createApplicationSettingsState(settings);
 					const projectServices = await openProjectServices({
 						options,
@@ -322,9 +366,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						interactive: interactiveRuntime !== undefined,
 						diagnostics: maintenanceDiagnostics,
 						resources: workspaceResources,
+						hooks: lifecycleHooks,
 					});
 					closeProjectUi = projectServices.closeUi;
-					const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand } = projectServices;
+					const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand, hooksCommand } = projectServices;
 					const skillsManager = projectSkills.manager;
 					const skillsSnapshot = projectSkills.snapshot;
 					const auth = await authenticateInitialModel({
@@ -355,6 +400,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						skillsManager,
 						mcpRegistry,
 						projectInstructions,
+						lifecycleHooks,
 					});
 					const activeProcessSessionManager = openedWorkspace.processSessionManager;
 					const inputResources = openedWorkspace.inputResources;
@@ -404,6 +450,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							skillsSnapshot,
 							skillsCommand,
 							mcpCommand,
+							hooksCommand,
 							commandRegistry,
 							model,
 							reasoning,

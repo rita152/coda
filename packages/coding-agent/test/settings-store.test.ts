@@ -53,6 +53,7 @@ describe("FileSettingsStore", () => {
 					sha256: "d".repeat(64),
 				},
 			],
+			hookTrust: [{ key: "workspace-stop-hook", sha256: "e".repeat(64) }],
 			ui: { motion: "reduced", colorScheme: "light" },
 		});
 
@@ -86,6 +87,7 @@ describe("FileSettingsStore", () => {
 					sha256: "d".repeat(64),
 				},
 			],
+			hookTrust: [{ key: "workspace-stop-hook", sha256: "e".repeat(64) }],
 			ui: { motion: "reduced", colorScheme: "light" },
 		});
 		const settingsPath = join(homeDirectory, ".coda", "settings.json");
@@ -120,6 +122,7 @@ describe("FileSettingsStore", () => {
 					sha256: "d".repeat(64),
 				},
 			],
+			hookTrust: [{ key: "workspace-stop-hook", sha256: "e".repeat(64) }],
 			ui: { motion: "reduced", colorScheme: "light" },
 		});
 		expect((await stat(join(homeDirectory, ".coda"))).mode & 0o777).toBe(0o700);

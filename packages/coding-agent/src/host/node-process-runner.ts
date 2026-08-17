@@ -68,12 +68,19 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 				const child = spawn(request.executable, [...request.args], {
 					cwd: request.cwd,
 					env: { ...request.environment },
-					stdio: ["ignore", "pipe", "pipe"],
+					stdio: [request.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 					detached: options.platform !== "win32",
 					shell: false,
 				});
-				child.stdout.setEncoding("utf8");
-				child.stderr.setEncoding("utf8");
+				child.stdout!.setEncoding("utf8");
+				child.stderr!.setEncoding("utf8");
+				let stdinFailure: unknown;
+				if (request.stdin !== undefined && child.stdin) {
+					child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+						if (error.code !== "EPIPE" && error.code !== "ERR_STREAM_DESTROYED") stdinFailure ??= error;
+					});
+					child.stdin.end(request.stdin);
+				}
 				const budget = new OutputBudget(request.maxOutputBytes, request.maxOutputLines);
 				const stdout: string[] = [];
 				const stderr: string[] = [];
@@ -106,8 +113,8 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 					(channel === "stdout" ? stdout : stderr).push(slice.visible);
 					writeOverflow(channel, slice.overflow);
 				};
-				child.stdout.on("data", (chunk: string) => receive("stdout", chunk));
-				child.stderr.on("data", (chunk: string) => receive("stderr", chunk));
+				child.stdout!.on("data", (chunk: string) => receive("stdout", chunk));
+				child.stderr!.on("data", (chunk: string) => receive("stderr", chunk));
 
 				const signalProcess = (signal: NodeJS.Signals): void => {
 					if (!child.pid) return;
@@ -157,6 +164,10 @@ export function createNodeProcessRunner(options: NodeProcessRunnerOptions): Proc
 					if (options.platform !== "win32") signalProcess("SIGTERM");
 					void finishOverflow().then(
 						() => {
+							if (stdinFailure !== undefined) {
+								reject(stdinFailure);
+								return;
+							}
 							if (observerFailure !== undefined) {
 								reject(observerFailure);
 								return;

@@ -2,6 +2,41 @@ import { describe, expect, it } from "vitest";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 
 describe("NodeProcessRunner output observation", () => {
+	it("writes the complete optional stdin payload and closes the pipe", async () => {
+		const result = await createNodeProcessRunner({ platform: process.platform }).run({
+			executable: process.execPath,
+			args: [
+				"-e",
+				"process.stdin.setEncoding('utf8'); let s=''; process.stdin.on('data', c => s += c); process.stdin.on('end', () => process.stdout.write(s));",
+			],
+			cwd: process.cwd(),
+			environment: process.env as Readonly<Record<string, string>>,
+			signal: new AbortController().signal,
+			timeoutMs: 5_000,
+			maxOutputBytes: 1_024,
+			maxOutputLines: 10,
+			stdin: '{"hook":true}',
+		});
+
+		expect(result.stdout).toBe('{"hook":true}');
+	});
+
+	it("allows a process to exit without consuming the complete stdin payload", async () => {
+		const result = await createNodeProcessRunner({ platform: process.platform }).run({
+			executable: process.execPath,
+			args: ["-e", "process.exit(0)"],
+			cwd: process.cwd(),
+			environment: process.env as Readonly<Record<string, string>>,
+			signal: new AbortController().signal,
+			timeoutMs: 5_000,
+			maxOutputBytes: 1_024,
+			maxOutputLines: 10,
+			stdin: "x".repeat(4 * 1_024 * 1_024),
+		});
+
+		expect(result.exitCode).toBe(0);
+	});
+
 	it("observes both pipes in callback order before the retained-output budget", async () => {
 		const chunks: string[] = [];
 		const result = await createNodeProcessRunner({ platform: process.platform }).run({

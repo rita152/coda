@@ -5,6 +5,7 @@ import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorSche
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { SkillCommandRegistryBinding } from "../commands/skill-extensions.ts";
+import type { HookRuntimeSnapshot } from "../hooks/types.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { Workspace } from "../host/workspace.ts";
@@ -150,6 +151,7 @@ export interface ProjectServices {
 	readonly commandRegistry: CommandRegistry;
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
+	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
 	closeUi(): void;
 }
 
@@ -162,6 +164,7 @@ export async function openProjectServices(input: {
 	readonly interactive: boolean;
 	readonly diagnostics: DiagnosticSink;
 	readonly resources: WorkspaceSessionResources;
+	readonly hooks: { snapshot(): HookRuntimeSnapshot };
 }): Promise<ProjectServices> {
 	let mcpConfiguration = input.mcpConfiguration;
 	let mcpRegistry: CodingMcpRegistry | undefined;
@@ -263,6 +266,7 @@ export async function openProjectServices(input: {
 					return mcpCommandSnapshot();
 				},
 			},
+			hooksCommand: { snapshot: () => input.hooks.snapshot() },
 			closeUi,
 		};
 	} catch (error) {

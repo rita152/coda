@@ -39,6 +39,13 @@ export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		arguments: { kind: "tail", required: false },
 	}),
 	coreCommand({
+		id: "core:hooks",
+		name: "hooks",
+		title: "Hooks",
+		description: "Inspect lifecycle Hook handlers, trust, and diagnostics",
+		kind: "control",
+	}),
+	coreCommand({
 		id: "core:session",
 		name: "session",
 		title: "Session",

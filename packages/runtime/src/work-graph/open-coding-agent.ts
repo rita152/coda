@@ -52,6 +52,7 @@ export async function openCodingAgent(options: OpenCodingAgentOptions): Promise<
 			tooling: options.tooling,
 			...(options.runBudget ? { runBudget: options.runBudget } : {}),
 			...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
+			...(options.lifecycleHooks ? { lifecycleHooks: options.lifecycleHooks } : {}),
 		},
 	});
 	engine = new WorkGraphEngine(

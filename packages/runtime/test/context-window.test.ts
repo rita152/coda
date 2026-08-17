@@ -10,7 +10,7 @@ import {
 	type Model,
 } from "@coda/ai";
 import { describe, expect, it } from "vitest";
-import { ContextWindowController } from "../src/context-window/context-window.ts";
+import { ContextWindowController, type ContextWindowControllerOptions } from "../src/context-window/context-window.ts";
 
 function testTimeRuntime(clockOrValue: { now(): number } | number = 0) {
 	const clock = typeof clockOrValue === "number" ? { now: () => clockOrValue } : clockOrValue;
@@ -23,6 +23,25 @@ function testTimeRuntime(clockOrValue: { now(): number } | number = 0) {
 }
 
 describe("ContextWindowController", () => {
+	it("runs lifecycle callbacks immediately around the durable compaction boundary", async () => {
+		const fixture = await controllerFixture();
+		fixture.faux.setResponses([fauxAssistantMessage(summary("hooked summary"), { timestamp: 10_000 })]);
+		const order: string[] = [];
+		const controller = fixture.controller({
+			beforeCompact: ({ reason }) => void order.push(`before:${reason}`),
+			commit: async () => void order.push("commit"),
+			afterCompact: (checkpoint, { reason }) =>
+				void order.push(`after:${reason}:${checkpoint.summary.includes("hooked summary")}`),
+		});
+
+		await controller.compact({
+			messages: [user("message:u1", "question"), assistant("message:a1", "answer")],
+			reason: "manual",
+		});
+
+		expect(order).toEqual(["before:manual", "commit", "after:manual:true"]);
+	});
+
 	it("does not activate a checkpoint when the durable commit fails", async () => {
 		const fixture = await controllerFixture();
 		fixture.faux.setResponses([fauxAssistantMessage(summary("atomic summary"), { timestamp: 10_000 })]);
@@ -222,7 +241,7 @@ async function controllerFixture(
 		select(modelId: string) {
 			selected = faux.getModel(modelId)!;
 		},
-		controller({ commit }: { commit: (checkpoint: CompactionCheckpoint) => Promise<void> }) {
+		controller(options: Pick<ContextWindowControllerOptions, "commit" | "beforeCompact" | "afterCompact">) {
 			return new ContextWindowController({
 				clock: runtime.clock,
 				idGenerator: { generate: (kind) => `${kind}:${++id}` },
@@ -230,7 +249,7 @@ async function controllerFixture(
 					const driver = models.bindSimple(selected as Model, { auth: {} });
 					return { model: selected as Model, complete: driver.complete };
 				},
-				commit,
+				...options,
 			});
 		},
 	};

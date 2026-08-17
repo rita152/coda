@@ -17,6 +17,7 @@ import {
 import { createContextOverflowFlow } from "../commands/context-overflow-flow.ts";
 import { createEffortCommandFlow } from "../commands/effort-flow.ts";
 import type { CommandFlowNavigation } from "../commands/flow-types.ts";
+import { createHooksCommandFlow, type HooksCommandFlowOptions } from "../commands/hooks-flow.ts";
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
@@ -118,6 +119,7 @@ export interface InteractiveSessionOptions {
 		readonly refresh: () => Promise<CodingSkillsSnapshot>;
 	};
 	readonly mcpCommand?: McpCommandFlowOptions;
+	readonly hooksCommand?: HooksCommandFlowOptions;
 	readonly contextOverflowRecovery?: {
 		takeUnrecoverable(): boolean;
 	};
@@ -461,6 +463,11 @@ async function runMultiSessionInteractive(
 				if (commandId === "core:mcp") {
 					if (!sessionOptions.mcpCommand) throw new Error("MCP management is unavailable");
 					await openMcpCommand(flow, argument, sessionOptions.mcpCommand);
+					return;
+				}
+				if (commandId === "core:hooks") {
+					if (!sessionOptions.hooksCommand) throw new Error("Hooks inspection is unavailable");
+					flow.open(createHooksCommandFlow(sessionOptions.hooksCommand));
 					return;
 				}
 				if (commandId === "core:session") {

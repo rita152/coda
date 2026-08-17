@@ -12,6 +12,7 @@ describe("core commands", () => {
 			"effort",
 			"skills",
 			"mcp",
+			"hooks",
 			"session",
 			"new",
 			"follow-up",

@@ -3,7 +3,7 @@ import { isAbsolute } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { Api, AuthResult, Model, Models, ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult } from "@coda/mcp";
-import type { OpenCodingAgentOptions } from "@coda/runtime";
+import type { LifecycleHookHost, OpenCodingAgentOptions } from "@coda/runtime";
 import type { DiagnosticSink, Scheduler } from "@coda/tui";
 import { collectWorkspaceDiff } from "../completion/workspace-diff.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
@@ -217,6 +217,7 @@ export interface WorkspaceSessionResources {
 	useMcpRegistry(registry: CodingMcpRegistry): void;
 	useProcessSessionManager(manager: ProcessSessionManager): void;
 	useWorkCoordinator(coordinator: WorkspaceWorkCoordinator): void;
+	useLifecycleHooks(hooks: LifecycleHookHost): void;
 	close(): Promise<void>;
 }
 
@@ -224,6 +225,7 @@ export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 	let mcpRegistry: CodingMcpRegistry | undefined;
 	let processSessionManager: ProcessSessionManager | undefined;
 	let workCoordinator: WorkspaceWorkCoordinator | undefined;
+	let lifecycleHooks: LifecycleHookHost | undefined;
 	return {
 		useMcpRegistry: (registry) => {
 			mcpRegistry = registry;
@@ -233,6 +235,9 @@ export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 		},
 		useWorkCoordinator: (coordinator) => {
 			workCoordinator = coordinator;
+		},
+		useLifecycleHooks: (hooks) => {
+			lifecycleHooks = hooks;
 		},
 		close: async () => {
 			const failures: unknown[] = [];
@@ -248,6 +253,11 @@ export function createWorkspaceSessionResources(): WorkspaceSessionResources {
 			}
 			try {
 				await mcpRegistry?.close();
+			} catch (error) {
+				failures.push(error);
+			}
+			try {
+				await lifecycleHooks?.close();
 			} catch (error) {
 				failures.push(error);
 			}
@@ -278,6 +288,7 @@ export async function openWorkspaceRuntime(input: {
 	readonly skillsManager: CodingSkillsManager;
 	readonly mcpRegistry?: CodingMcpRegistry;
 	readonly projectInstructions?: TrustedProjectInstructions;
+	readonly lifecycleHooks?: LifecycleHookHost;
 }): Promise<OpenedWorkspaceRuntime> {
 	const configuredShell = input.options.runtime.environment.SHELL;
 	const shellExecutable = configuredShell && isAbsolute(configuredShell) ? configuredShell : "/bin/sh";
@@ -288,6 +299,7 @@ export async function openWorkspaceRuntime(input: {
 		idGenerator: input.options.runtime.idGenerator,
 	});
 	const inputResources = new WorkspaceInputResources();
+	if (input.lifecycleHooks) input.resources.useLifecycleHooks(input.lifecycleHooks);
 	input.resources.useProcessSessionManager(processSessionManager);
 	const workspacePersistence = input.options.workspacePersistence?.({
 		workspaceId: input.workspaceId,
@@ -310,6 +322,7 @@ export async function openWorkspaceRuntime(input: {
 		platform: input.options.runtime.platform,
 		interactionMode: input.mode,
 		projectInstructions: input.projectInstructions,
+		lifecycleHooks: input.lifecycleHooks,
 		resources: inputResources.adapter,
 		openPrivateSession: (sessionId) =>
 			input.sessions.open({

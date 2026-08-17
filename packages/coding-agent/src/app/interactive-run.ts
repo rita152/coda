@@ -86,6 +86,7 @@ export interface RunInteractiveApplicationInput {
 	readonly skillsSnapshot: CodingSkillsSnapshot;
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
+	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
 	readonly commandRegistry: CommandRegistry;
 	readonly model: Model<Api>;
 	readonly reasoning: ThinkingLevel | "off";
@@ -201,6 +202,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 				authCommand,
 				skillsCommand: input.skillsCommand,
 				mcpCommand: input.mcpCommand,
+				hooksCommand: input.hooksCommand,
 				reasoning: targetReasoning,
 				skillsManager: input.skillsManager,
 				skillsSnapshot: input.skillsSnapshot,
@@ -233,6 +235,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 		authCommand,
 		skillsCommand: input.skillsCommand,
 		mcpCommand: input.mcpCommand,
+		hooksCommand: input.hooksCommand,
 		skillsManager: input.skillsManager,
 		skillsSnapshot: input.skillsSnapshot,
 		inputResources: input.inputResources,

@@ -4,6 +4,7 @@
  * Physical host knowledge crosses only the named capabilities declared here.
  */
 import type { AgentInput, AgentTool, IdGenerator, RunBudget, Session } from "@coda/agent";
+import type { LifecycleHookHost } from "../lifecycle-hooks.ts";
 import type { SystemPromptSnapshot, TrustedProjectInstructions } from "../prompt/prompt-builder.ts";
 import type {
 	ModelDriverLease,
@@ -312,4 +313,5 @@ export interface OpenCodingAgentOptions {
 	) => TrustedProjectInstructions | undefined | Promise<TrustedProjectInstructions | undefined>;
 	readonly systemPrompt?: SystemPromptSnapshot;
 	readonly workerControl?: WorkerControlSink;
+	readonly lifecycleHooks?: LifecycleHookHost;
 }

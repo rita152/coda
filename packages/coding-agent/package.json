@@ -15,6 +15,7 @@
 		"#completion/*": "./dist/completion/*.js",
 		"#credentials/*": "./dist/credentials/*.js",
 		"#host/*": "./dist/host/*.js",
+		"#hooks/*": "./dist/hooks/*.js",
 		"#maintenance/*": "./dist/maintenance/*.js",
 		"#mcp/*": "./dist/mcp/*.js",
 		"#media/*": "./dist/media/*.js",

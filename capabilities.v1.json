@@ -107,6 +107,12 @@
         "arguments": "tail"
       },
       {
+        "name": "hooks",
+        "aliases": [],
+        "visible": true,
+        "arguments": "none"
+      },
+      {
         "name": "session",
         "aliases": [],
         "visible": true,
@@ -311,6 +317,24 @@
       "tests": [
         "packages/coding-agent/test/credential-store.test.ts",
         "packages/coding-agent/test/secret-service-credential-store.test.ts"
+      ]
+    },
+    {
+      "id": "coding-agent.lifecycle-hooks",
+      "package": "@coda/coding-agent",
+      "status": "runtime-supported",
+      "title": "Lifecycle Hooks",
+      "summary": "Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, and Stop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation.",
+      "sources": [
+        "packages/coding-agent/src/hooks/config.ts",
+        "packages/coding-agent/src/hooks/manager.ts",
+        "packages/runtime/src/lifecycle-hooks.ts",
+        "packages/runtime/src/work-graph/worker-runtime.ts"
+      ],
+      "tests": [
+        "packages/coding-agent/test/hooks-application.test.ts",
+        "packages/coding-agent/test/hooks.test.ts",
+        "packages/runtime/test/context-window.test.ts"
       ]
     },
     {
@@ -686,6 +710,20 @@
       "tests": [
         "packages/ai/test/opencode-go-provider.test.ts",
         "packages/ai/test/root-exports.test.ts"
+      ]
+    },
+    {
+      "id": "coding-agent.deferred-lifecycle-hooks",
+      "package": "@coda/coding-agent",
+      "status": "deferred",
+      "title": "Permission and delegated-worker Hooks",
+      "summary": "PermissionRequest, SubagentStart, and SubagentStop are recognized configuration events but remain inert until Coda owns permission and delegated-worker lifecycle capabilities.",
+      "sources": [
+        "packages/coding-agent/src/hooks/config.ts",
+        "packages/runtime/src/lifecycle-hooks.ts"
+      ],
+      "tests": [
+        "packages/coding-agent/test/hooks.test.ts"
       ]
     },
     {

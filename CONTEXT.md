@@ -164,6 +164,14 @@ _Avoid_: Tool output, details, isError
 The executor boundary outcome stating whether a Tool returned, threw, or was aborted, independent of whether the returned operation itself succeeded or failed.
 _Avoid_: Tool Observation, exit status, Tool result
 
+**Lifecycle Hook**:
+A user-configured reaction at a named Coding Agent lifecycle boundary that may contribute context, guard an operation, or request continued work according to that boundary's contract.
+_Avoid_: Tool, plugin, event listener
+
+**Hook Handler Trust**:
+The decision to execute one exact Lifecycle Hook handler revision; changing the handler invalidates the decision without disabling unrelated handlers.
+_Avoid_: Project Trust, configuration-file trust, shell permission
+
 **MCP Host**:
 The Coding Agent facility that discovers and invokes Tools offered by configured external MCP Servers.
 _Avoid_: MCP Server, plugin host, Extension loader

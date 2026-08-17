@@ -149,6 +149,7 @@ export interface CreateInteractiveSessionOptionsInput {
 	readonly authCommand: NonNullable<InteractiveSessionOptions["authCommand"]>;
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
+	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
 	readonly skillsManager: CodingSkillsManager;
 	readonly skillsSnapshot: CodingSkillsSnapshot;
 	readonly inputResources: WorkspaceInputResources;
@@ -181,6 +182,7 @@ export function createInteractiveSessionOptions(
 		authCommand: input.authCommand,
 		skillsCommand: input.skillsCommand,
 		mcpCommand: input.mcpCommand,
+		hooksCommand: input.hooksCommand,
 		reasoning: input.reasoning,
 		restoredAttachments: input.restoredMedia.attachments,
 		resolveExtensionReferences: createExtensionReferenceResolver(input.skillsManager),

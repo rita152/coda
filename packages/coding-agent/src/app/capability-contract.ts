@@ -204,6 +204,25 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		],
 	}),
 	capability({
+		id: "coding-agent.lifecycle-hooks",
+		package: "@coda/coding-agent",
+		status: "runtime-supported",
+		title: "Lifecycle Hooks",
+		summary:
+			"Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, and Stop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation.",
+		sources: [
+			"packages/runtime/src/lifecycle-hooks.ts",
+			"packages/runtime/src/work-graph/worker-runtime.ts",
+			"packages/coding-agent/src/hooks/config.ts",
+			"packages/coding-agent/src/hooks/manager.ts",
+		],
+		tests: [
+			"packages/coding-agent/test/hooks.test.ts",
+			"packages/coding-agent/test/hooks-application.test.ts",
+			"packages/runtime/test/context-window.test.ts",
+		],
+	}),
+	capability({
 		id: "coding-agent.overflow-fallback",
 		package: "@coda/coding-agent",
 		status: "runtime-supported",
@@ -458,6 +477,16 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		summary: "RPC, client/server mode, and a public Coding Agent SDK are not implemented.",
 		sources: ["packages/coding-agent/package.json", "packages/coding-agent/src/index.ts"],
 		tests: ["packages/coding-agent/test/public-contract.test.ts"],
+	}),
+	capability({
+		id: "coding-agent.deferred-lifecycle-hooks",
+		package: "@coda/coding-agent",
+		status: "deferred",
+		title: "Permission and delegated-worker Hooks",
+		summary:
+			"PermissionRequest, SubagentStart, and SubagentStop are recognized configuration events but remain inert until Coda owns permission and delegated-worker lifecycle capabilities.",
+		sources: ["packages/runtime/src/lifecycle-hooks.ts", "packages/coding-agent/src/hooks/config.ts"],
+		tests: ["packages/coding-agent/test/hooks.test.ts"],
 	}),
 	capability({
 		id: "editor.advanced-editing",

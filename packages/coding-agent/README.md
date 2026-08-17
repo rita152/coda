@@ -129,7 +129,7 @@ configuration fields.
 The Composer's borderless upper list exposes the core Slash commands:
 
 <!-- coda:core-commands:start -->
-Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/session`, `/new`, and `/follow-up`.
+Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/hooks`, `/session`, `/new`, and `/follow-up`.
 <!-- coda:core-commands:end -->
 
 Selector commands open nested menus and do not accept
@@ -153,6 +153,70 @@ selection. Coda does not make a separate Skill safety decision. Explicit
 Composer Skill references are user-selected context; model-selected Skills use
 the `skill` Tool to load exact-revision instructions. `/skills` remains the sole
 Skill management command.
+
+## Lifecycle Hooks
+
+Coda supports Codex-compatible command hooks from `~/.coda/hooks.json` and
+`<Workspace>/.coda/hooks.json`. User configuration is merged before Workspace
+configuration. Every command handler is inert until its exact definition hash
+is confirmed interactively or admitted with `--trust-hooks`; changing one
+handler invalidates only that handler's trust record. `/hooks` shows installed
+and active counts for every event, source paths, matchers, trust state, and
+configuration diagnostics.
+
+The implemented events are `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `PreCompact`, `PostCompact`, `Stop`, and `SessionEnd`.
+`PermissionRequest`, `SubagentStart`, and `SubagentStop` are deliberately
+recognized but not executed because Coda does not yet own those lifecycle
+capabilities.
+
+```json
+{
+  "description": "Workspace policy and feedback",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/check-tool-policy.sh",
+            "timeout": 30,
+            "statusMessage": "Checking workspace policy"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/verify-before-stop.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Commands run in the active Workspace directory, inherit Coda's environment,
+receive one JSON object on stdin, and use the same output protocol as Codex.
+Handlers selected for a synchronous event run concurrently. Exit code `2` plus
+stderr blocks `PreToolUse` and `UserPromptSubmit`, replaces `PostToolUse`
+feedback, or supplies a `Stop` continuation. JSON output can use the universal
+`continue`, `stopReason`, and `systemMessage` fields. Event-specific
+`hookSpecificOutput` supports prompt/context contributions and `PreToolUse`
+`permissionDecision`, `permissionDecisionReason`, and `updatedInput`. An
+`updatedInput` is validated against the actual Coda Tool schema before use.
+
+`async: true` runs a handler in the background with at most eight active async
+handlers per Session; completed output is offered at the next model-call safe
+point. `SessionEnd` always runs synchronously, defaults to a one-second timeout,
+and is capped at three seconds. Other handlers default to 600 seconds. `Bash`
+is the hook-facing shell Tool name, and Coda's `patch` Tool is exposed as
+`apply_patch` with `Edit` and `Write` matcher aliases.
 
 ## MCP Servers
 
@@ -251,6 +315,7 @@ This status block is generated from executable runtime contracts. See the
 - **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
+- **Lifecycle Hooks** (@coda/coding-agent) — Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, and Stop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation.
 - **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.
 - **Media Assets** (@coda/coding-agent) — Bounded image Attachments use content-addressed Session storage, model-ready renditions, Kitty previews, and a system-viewer fallback.
 - **Context Overflow fallback** (@coda/coding-agent) — After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.
@@ -279,6 +344,7 @@ This status block is generated from executable runtime contracts. See the
 
 - **Deferred model responses** (@coda/ai) — Fetching or cancelling deferred Provider responses has type-level representation but no supported OpenCode Go runtime implementation.
 - **Additional AI runtimes** (@coda/ai) — Complete OAuth, image generation, Providers beyond OpenCode Go or explicit custom Providers, and Browser or Bun entries are not implemented.
+- **Permission and delegated-worker Hooks** (@coda/coding-agent) — PermissionRequest, SubagentStart, and SubagentStop are recognized configuration events but remain inert until Coda owns permission and delegated-worker lifecycle capabilities.
 - **Remote application interfaces** (@coda/coding-agent) — RPC, client/server mode, and a public Coding Agent SDK are not implemented.
 - **Advanced editing** (@coda/tui) — Autocomplete, selection, clipboard protocols, redo, durable drafts, and syntax highlighting are not implemented.
 - **Additional MCP primitives** (@coda/mcp) — Resources, Prompts, Roots, Sampling, Logging, complete OAuth, and legacy HTTP+SSE transport are outside the current MCP Host.

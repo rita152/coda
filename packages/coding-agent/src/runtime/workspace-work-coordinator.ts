@@ -5,6 +5,7 @@ import { type AuthResult, createSystemTimeRuntime, type Models, type ThinkingLev
 import type { McpElicitationResult, McpToolLease } from "@coda/mcp";
 import {
 	type CodingAgent,
+	type LifecycleHookHost,
 	type ModelDriverLease,
 	type OpenCodingAgentOptions,
 	openCodingAgent,
@@ -232,6 +233,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly createWorkspaceExecution?: (
 		context: WorkspaceExecutionFactoryContext,
 	) => WorkspaceExecution | Promise<WorkspaceExecution>;
+	readonly lifecycleHooks?: LifecycleHookHost;
 }): WorkspaceWorkCoordinator {
 	const capacity = options.capacity ?? DEFAULT_WORK_CAPACITY_POLICY;
 	const sessions = new WorkspaceWorkSessions({
@@ -439,6 +441,7 @@ export function createWorkspaceWorkCoordinator(options: {
 					...(options.maxOutputTokens === undefined ? {} : { maxOutputTokens: options.maxOutputTokens }),
 					platform: options.platform,
 					interactionMode: options.interactionMode,
+					...(options.lifecycleHooks ? { lifecycleHooks: options.lifecycleHooks } : {}),
 					...(options.projectInstructions ? { projectInstructions: () => options.projectInstructions } : {}),
 					workerControl: {
 						accept: ({ sessionId, placement, event }) => {
@@ -470,8 +473,22 @@ export function createWorkspaceWorkCoordinator(options: {
 			if (closeOperation) throw new Error("Workspace Work Coordinator is closing");
 			registerSelection(request.selection);
 			const binding = sessions.register(request.session);
+			let hookSessionStarted = false;
 			if (request.mcpElicitation) elicitationBySession.set(binding.session.id, request.mcpElicitation);
 			try {
+				if (options.lifecycleHooks) {
+					await options.lifecycleHooks.sessionStart({
+						sessionId: binding.session.id,
+						...(binding.session.descriptor.path ? { transcriptPath: binding.session.descriptor.path } : {}),
+						cwd: binding.session.descriptor.workspace.path,
+						model: request.selection.model.id,
+						source:
+							binding.session.seed.messages.length > 0 || binding.session.recoverableFollowUps.length > 0
+								? "resume"
+								: "startup",
+					});
+					hookSessionStarted = true;
+				}
 				const openedAgent = await ensureAgent();
 				const host: SessionWorkHost = {
 					agent: openedAgent,
@@ -483,8 +500,29 @@ export function createWorkspaceWorkCoordinator(options: {
 						if (controllers.get(controller.sessionId) !== controller) return;
 						controllers.delete(controller.sessionId);
 						elicitationBySession.delete(controller.sessionId);
-						sessions.release(controller.sessionId);
-						await controller.session.close();
+						const failures: unknown[] = [];
+						try {
+							await options.lifecycleHooks?.sessionEnd({
+								sessionId: binding.session.id,
+								...(binding.session.descriptor.path ? { transcriptPath: binding.session.descriptor.path } : {}),
+								cwd: binding.session.descriptor.workspace.path,
+								reason: "other",
+							});
+						} catch (error) {
+							failures.push(error);
+						}
+						try {
+							sessions.release(controller.sessionId);
+						} catch (error) {
+							failures.push(error);
+						}
+						try {
+							await controller.session.close();
+						} catch (error) {
+							failures.push(error);
+						}
+						if (failures.length === 1) throw failures[0];
+						if (failures.length > 1) throw new AggregateError(failures, "Session close failed");
 					},
 				};
 				const controller = new SessionWorkController({
@@ -497,6 +535,16 @@ export function createWorkspaceWorkCoordinator(options: {
 				return controller;
 			} catch (error) {
 				elicitationBySession.delete(binding.session.id);
+				if (hookSessionStarted) {
+					await options.lifecycleHooks
+						?.sessionEnd({
+							sessionId: binding.session.id,
+							...(binding.session.descriptor.path ? { transcriptPath: binding.session.descriptor.path } : {}),
+							cwd: binding.session.descriptor.workspace.path,
+							reason: "other",
+						})
+						.catch(() => undefined);
+				}
 				sessions.release(binding.session.id);
 				throw error;
 			}

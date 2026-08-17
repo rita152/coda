@@ -1,4 +1,15 @@
 export type {
+	HookContinueOutcome,
+	LifecycleHookEventName,
+	LifecycleHookHost,
+	LifecycleHookSessionContext,
+	LifecycleHookTurnContext,
+	PostToolUseHookOutcome,
+	PreToolUseHookOutcome,
+	StopHookOutcome,
+	UserPromptSubmitHookOutcome,
+} from "./lifecycle-hooks.ts";
+export type {
 	CreateRunCapabilityHostOptions,
 	ModelDriverLease,
 	ModelDriverSource,

@@ -40,6 +40,7 @@ function validateSettings(value: unknown): UserSettings {
 			"projectTrust",
 			"mcpServers",
 			"workspaceMcpTrust",
+			"hookTrust",
 			"ui",
 		])
 	) {
@@ -170,6 +171,29 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain duplicate Workspace MCP Trust records");
 		}
 	}
+	let hookTrust: UserSettings["hookTrust"];
+	if (value.hookTrust !== undefined) {
+		if (!Array.isArray(value.hookTrust)) {
+			throw new Error("Coda settings contain invalid Hook Trust records");
+		}
+		hookTrust = value.hookTrust.map((entry) => {
+			if (
+				!isRecord(entry) ||
+				!hasOnlyKeys(entry, ["key", "sha256"]) ||
+				typeof entry.key !== "string" ||
+				entry.key.length === 0 ||
+				typeof entry.sha256 !== "string" ||
+				!/^[a-f0-9]{64}$/u.test(entry.sha256)
+			) {
+				throw new Error("Coda settings contain invalid Hook Trust records");
+			}
+			return { key: entry.key, sha256: entry.sha256 };
+		});
+		hookTrust = [...hookTrust].sort((left, right) => left.key.localeCompare(right.key));
+		if (new Set(hookTrust.map(({ key }) => key)).size !== hookTrust.length) {
+			throw new Error("Coda settings contain duplicate Hook Trust records");
+		}
+	}
 	if (value.ui !== undefined) {
 		if (
 			!isRecord(value.ui) ||
@@ -194,6 +218,7 @@ function validateSettings(value: unknown): UserSettings {
 		...(projectTrust ? { projectTrust } : {}),
 		...(mcpServers ? { mcpServers } : {}),
 		...(workspaceMcpTrust ? { workspaceMcpTrust } : {}),
+		...(hookTrust ? { hookTrust } : {}),
 		...(ui ? { ui } : {}),
 	};
 }

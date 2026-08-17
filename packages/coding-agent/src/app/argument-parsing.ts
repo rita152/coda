@@ -40,6 +40,7 @@ export interface ParsedArguments {
 	readonly workspace?: string;
 	readonly trustProject: boolean;
 	readonly trustProjectMcp: boolean;
+	readonly trustHooks: boolean;
 	readonly persistSession: boolean;
 	readonly noSession: boolean;
 	readonly noColor: boolean;
@@ -79,6 +80,7 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 	let workspace: string | undefined;
 	let trustProject = false;
 	let trustProjectMcp = false;
+	let trustHooks = false;
 	let persistSession = false;
 	let noSession = false;
 	let noColor = false;
@@ -227,6 +229,10 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 			trustProjectMcp = true;
 			continue;
 		}
+		if (argument === "--trust-hooks") {
+			trustHooks = true;
+			continue;
+		}
 		if (argument === "--session") {
 			if (noSession) throw new Error("--session and --no-session cannot be combined");
 			persistSession = true;
@@ -305,6 +311,7 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 		workspace,
 		trustProject,
 		trustProjectMcp,
+		trustHooks,
 		persistSession,
 		noSession,
 		noColor,
@@ -363,6 +370,7 @@ Workspace:
       --workspace <path>         Select the Workspace root
       --trust-project            Trust the current root AGENTS.md hash
       --trust-project-mcp        Trust the exact current Workspace MCP configuration
+      --trust-hooks              Trust all exact Hook handler hashes after review
 
 Session:
       --session                  Persist this Session (print mode is memory-only by default)
