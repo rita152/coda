@@ -121,6 +121,7 @@ export type SessionChange =
 	| { readonly type: "follow_up_enqueued"; readonly item: FollowUp }
 	| { readonly type: "composer_submission_recorded"; readonly submission: ComposerSubmission }
 	| { readonly type: "composer_submission_retracted"; readonly id: string }
+	| { readonly type: "session_title_set"; readonly title: string }
 	| {
 			readonly type: "follow_up_consumed" | "follow_up_canceled" | "follow_up_reclaimed";
 			readonly id: QueueItemId;
@@ -130,6 +131,8 @@ export interface Session extends AgentSession {
 	readonly descriptor: SessionDescriptor;
 	/** True after semantic activity makes this Session discoverable and resumable history. */
 	readonly hasRetainedActivity: boolean;
+	/** Generated Session Title when one has been recorded. */
+	readonly title?: string;
 	readonly restored: RestoredSessionState;
 	readonly recoverableFollowUps: readonly RecoverableFollowUp[];
 	readonly composerSubmissions: readonly ComposerSubmission[];

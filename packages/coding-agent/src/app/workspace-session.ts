@@ -23,6 +23,7 @@ import type {
 	createWorkspaceWorkCoordinator,
 	WorkspaceWorkCoordinator,
 } from "../runtime/workspace-work-coordinator.ts";
+import { createSessionTitleComplete, subscribeSessionTitleGeneration } from "../session/session-title.ts";
 import type { Session, SessionManager } from "../session/types.ts";
 import type { TrustedProjectInstructions } from "../settings/project-context.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
@@ -359,6 +360,7 @@ export interface OpenedSessionRuntime {
 export async function openSessionRuntime(input: {
 	readonly options: {
 		readonly fileSystem: FileSystem;
+		readonly models: Pick<Models, "bindSimple">;
 		readonly runtime: Pick<WorkspaceSessionRuntime, "homeDirectory" | "clock" | "idGenerator" | "scheduler">;
 	};
 	readonly coordinator: WorkspaceWorkCoordinator;
@@ -406,6 +408,11 @@ export async function openSessionRuntime(input: {
 		let closeOperation: Promise<void> | undefined;
 		const openedWork = work;
 		const openedRunControl = runControl;
+		const titleGeneration = subscribeSessionTitleGeneration({
+			session: input.session,
+			subscribe: (observer) => openedWork.subscribe(observer),
+			complete: createSessionTitleComplete(input.options.models, input.model, input.authSnapshot),
+		});
 		return {
 			session: input.session,
 			work: openedWork,
@@ -416,6 +423,12 @@ export async function openSessionRuntime(input: {
 				if (closeOperation) return closeOperation;
 				closeOperation = (async () => {
 					const failures: unknown[] = [];
+					try {
+						titleGeneration.dispose();
+						await titleGeneration.done;
+					} catch (error) {
+						failures.push(error);
+					}
 					try {
 						openedRunControl?.dispose();
 					} catch (error) {

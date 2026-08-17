@@ -53,6 +53,7 @@ export class ManagedSession implements Session {
 	#compactionCheckpoint?: CompactionCheckpoint;
 	#discardedModelCost?: number;
 	#hasRetainedActivity: boolean;
+	#title?: string;
 	#sequence: number;
 	#previousRecordId: string | null;
 	#closed = false;
@@ -80,6 +81,7 @@ export class ManagedSession implements Session {
 			: undefined;
 		this.#discardedModelCost = reduced.discardedModelCost;
 		this.#hasRetainedActivity = hasRetainedSessionActivity(journal.records);
+		this.#title = reduced.title;
 		this.#mediaReferences = new Map(
 			[...(journal.mediaReferences ?? new Map())].map(([messageId, references]) => [
 				messageId,
@@ -101,6 +103,10 @@ export class ManagedSession implements Session {
 
 	get hasRetainedActivity(): boolean {
 		return this.#hasRetainedActivity;
+	}
+
+	get title(): string | undefined {
+		return this.#title;
 	}
 
 	get seed() {
@@ -197,6 +203,11 @@ export class ManagedSession implements Session {
 		}
 		if (change.type === "composer_submission_retracted") {
 			await this.#append("composer_submission_retracted", { id: change.id });
+			return;
+		}
+		if (change.type === "session_title_set") {
+			await this.#append("session_title_set", { title: change.title });
+			this.#title = change.title;
 			return;
 		}
 		await this.#append(change.type, change.type === "follow_up_enqueued" ? { item: change.item } : { id: change.id });

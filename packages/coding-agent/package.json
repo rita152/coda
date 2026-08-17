@@ -44,6 +44,7 @@
 		"build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/mark-bin-executable.mjs dist/bin.js",
 		"check": "tsc --noEmit -p tsconfig.json && biome check src test scripts vitest*.config.ts",
 		"test": "vitest run",
+		"test:live": "vitest run --config vitest.live.config.ts",
 		"test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
 		"pack:dry-run": "npm pack --dry-run"
 	},

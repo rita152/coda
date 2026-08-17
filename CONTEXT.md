@@ -204,6 +204,10 @@ _Avoid_: Retry, Turn, Run
 A workspace-scoped, resumable append-only record spanning one or more Runs. Its foundation port and application journal are two depths of the same object; lease ownership is external to it.
 _Avoid_: Run, transcript, process
 
+**Session Title**:
+A short, durable, model-generated label for one Session, used by Session pickers instead of the first Prompt. It is not a Compaction summary and is not the Session identity.
+_Avoid_: first Prompt, thread name, preview, summary
+
 **Agent Seed**:
 Validated, immutable state used to initialize an idle Agent from a Session without exposing persistence records or reducer internals.
 _Avoid_: Session log, Agent event

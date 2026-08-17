@@ -569,6 +569,13 @@ function validateSessionRecordPayload(
 			return (
 				version >= 7 && exactRecord(payload, ["checkpoint"]) && isCompactionCheckpoint(payload.checkpoint, version)
 			);
+		case "session_title_set":
+			return (
+				version >= 11 &&
+				exactRecord(payload, ["title"]) &&
+				isNonEmptyString(payload.title) &&
+				payload.title.trim().length > 0
+			);
 	}
 	const exhaustive: never = type;
 	return exhaustive;
@@ -601,6 +608,7 @@ export const SESSION_RECORD_PAYLOAD_VALIDATORS = Object.freeze({
 	project_trust_changed: validatorFor("project_trust_changed"),
 	mcp_trust_changed: validatorFor("mcp_trust_changed"),
 	context_compacted: validatorFor("context_compacted"),
+	session_title_set: validatorFor("session_title_set"),
 } satisfies Readonly<Record<SessionRecordType, SessionRecordPayloadValidator>>);
 
 export function isSessionRecordPayload(

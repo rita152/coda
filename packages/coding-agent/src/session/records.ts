@@ -74,13 +74,14 @@ export interface SessionRecordPayloadMap {
 	readonly project_trust_changed: { readonly trust: ProjectTrustRecord };
 	readonly mcp_trust_changed: { readonly trust: WorkspaceMcpTrustRecord };
 	readonly context_compacted: { readonly checkpoint: CompactionCheckpoint };
+	readonly session_title_set: { readonly title: string };
 }
 
 export type SessionRecordType = keyof SessionRecordPayloadMap;
 
-export const SUPPORTED_SESSION_FORMAT_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
+export const SUPPORTED_SESSION_FORMAT_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] as const;
 export type SessionFormatVersion = (typeof SUPPORTED_SESSION_FORMAT_VERSIONS)[number];
-export const CURRENT_SESSION_FORMAT_VERSION = 10 satisfies SessionFormatVersion;
+export const CURRENT_SESSION_FORMAT_VERSION = 11 satisfies SessionFormatVersion;
 
 /** Runtime metadata is compile-time checked against the complete payload algebra. */
 export const SESSION_RECORD_INTRODUCED_VERSIONS = Object.freeze({
@@ -104,6 +105,7 @@ export const SESSION_RECORD_INTRODUCED_VERSIONS = Object.freeze({
 	project_trust_changed: 1,
 	mcp_trust_changed: 6,
 	context_compacted: 7,
+	session_title_set: 11,
 } satisfies Readonly<Record<SessionRecordType, SessionFormatVersion>>);
 
 export const SESSION_RECORD_TYPES = Object.freeze(
@@ -152,6 +154,7 @@ export interface ReducedSession {
 	readonly activeRuns: ReadonlySet<string>;
 	readonly compactionCheckpoint?: CompactionCheckpoint;
 	readonly discardedModelCost?: number;
+	readonly title?: string;
 }
 
 function persistedMessage(message: AgentMessage): AgentMessage {
@@ -243,6 +246,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 	let reasoning: RestoredSessionState["reasoning"];
 	let compactionCheckpoint: CompactionCheckpoint | undefined;
 	let discardedModelCost: number | undefined = 0;
+	let title: string | undefined;
 
 	for (const record of records) {
 		switch (record.type) {
@@ -312,6 +316,11 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 				break;
 			case "context_compacted": {
 				compactionCheckpoint = structuredClone(record.payload.checkpoint);
+				break;
+			}
+			case "session_title_set": {
+				const next = record.payload.title.trim();
+				if (next) title = next;
 				break;
 			}
 			case "tool_started": {
@@ -408,6 +417,7 @@ export function reduceSession(records: readonly SessionRecord[]): ReducedSession
 		activeRuns,
 		...(discardedModelCost !== undefined ? { discardedModelCost } : {}),
 		...(compactionCheckpoint ? { compactionCheckpoint: structuredClone(compactionCheckpoint) } : {}),
+		...(title ? { title } : {}),
 	};
 }
 

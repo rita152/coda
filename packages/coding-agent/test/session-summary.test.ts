@@ -36,6 +36,17 @@ describe("Session summary", () => {
 		});
 	});
 
+	it("prefers a generated Session Title over the first Prompt", () => {
+		const summary = summarizeSessionRecords(descriptor(), [
+			record(1, "composer_submission_recorded", {
+				submission: { id: "submission:1", kind: "prompt", text: "Please implement a readable session picker" },
+			}),
+			record(2, "session_title_set", { title: "Readable session picker" }),
+		]);
+
+		expect(summary.title).toBe("Readable session picker");
+	});
+
 	it("uses the latest selected model while retaining a matching observed protocol", () => {
 		const summary = summarizeSessionRecords(descriptor(), [
 			record(1, "message_committed", {

@@ -168,6 +168,37 @@ describe("JSONL File Session", () => {
 		await session.close();
 	});
 
+	it("persists a generated Session Title and prefers it in the listing", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-title-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_171 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+		const workspace = { id: "workspace-hash", path: "/canonical/workspace" };
+		const session = await manager.open({ workspace, mode: "interactive", persistent: true });
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: { id: "submission:title", kind: "prompt", text: "Please implement a readable session picker" },
+		});
+		await session.record({ type: "session_title_set", title: "Readable session picker" });
+		expect(session.title).toBe("Readable session picker");
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		expect(await manager.listSummaries(workspace)).toEqual([
+			expect.objectContaining({ title: "Readable session picker", promptCount: 1 }),
+		]);
+		const restored = await manager.open({ workspace, mode: "interactive", resumeId: sessionId });
+		expect(restored.title).toBe("Readable session picker");
+		await restored.close();
+	});
+
 	it("hides legacy setup-only journals without making direct resume destructive", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-hidden-legacy-"));
 		temporaryDirectories.push(homeDirectory);
@@ -269,12 +300,12 @@ describe("JSONL File Session", () => {
 		await restored.close();
 	});
 
-	it("keeps empty Session v1 through v9 journals readable while upgrading them to v10", async () => {
+	it("keeps empty Session v1 through v10 journals readable while upgrading them to v11", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-all-migrations-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
 		await mkdir(directory, { recursive: true });
-		for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9] as const) {
+		for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const) {
 			const sessionId = `session-v${version}`;
 			await writeFile(
 				join(directory, `${sessionId}.jsonl`),
@@ -299,7 +330,7 @@ describe("JSONL File Session", () => {
 			processInspector: { status: async () => "alive" },
 		});
 
-		for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9] as const) {
+		for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const) {
 			const sessionId = `session-v${version}`;
 			const restored = await manager.open({
 				workspace: { id: "workspace-hash", path: "/canonical/workspace" },
@@ -309,7 +340,7 @@ describe("JSONL File Session", () => {
 			expect(restored.composerSubmissions).toEqual([]);
 			await restored.close();
 			expect(JSON.parse((await readFile(join(directory, `${sessionId}.jsonl`), "utf8")).trim())).toMatchObject({
-				version: 10,
+				version: 11,
 			});
 		}
 	});
@@ -423,7 +454,7 @@ describe("JSONL File Session", () => {
 			.trimEnd()
 			.split("\n")
 			.map((line) => JSON.parse(line));
-		expect(lines[0]).toMatchObject({ type: "session", version: 10, sessionId });
+		expect(lines[0]).toMatchObject({ type: "session", version: 11, sessionId });
 		const records = lines.slice(1);
 		expect(records.map((record) => record.sequence)).toEqual(records.map((_, index) => index + 1));
 		expect(records[0].previousRecordId).toBeNull();
@@ -458,7 +489,7 @@ describe("JSONL File Session", () => {
 		await restored.close();
 	});
 
-	it("atomically migrates v1 inline images to v10 media references while preserving a backup", async () => {
+	it("atomically migrates v1 inline images to v11 media references while preserving a backup", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -531,7 +562,7 @@ describe("JSONL File Session", () => {
 		await resumed.close();
 
 		const migrated = await readFile(path, "utf8");
-		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 10 });
+		expect(JSON.parse(migrated.split("\n")[0]!)).toMatchObject({ version: 11 });
 		expect(migrated).not.toContain(imageData);
 		expect(migrated).toContain('"type":"media"');
 		expect(await readFile(`${path}.v1.backup`, "utf8")).toBe(legacyText);
@@ -541,7 +572,7 @@ describe("JSONL File Session", () => {
 		expect((await stat(mediaPath)).mode & 0o777).toBe(0o600);
 	});
 
-	it("atomically upgrades a v2 journal to v10 before accepting reclaimed Follow-up records", async () => {
+	it("atomically upgrades a v2 journal to v11 before accepting reclaimed Follow-up records", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v3-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -578,12 +609,12 @@ describe("JSONL File Session", () => {
 		});
 		await resumed.close();
 
-		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 10 });
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 11 });
 		expect(await readFile(`${path}.v2.backup`, "utf8")).toBe(legacyText);
 		expect(diagnostics).toContain("session.migrated");
 	});
 
-	it("atomically upgrades a v3 journal to v10 and preserves a v3 backup", async () => {
+	it("atomically upgrades a v3 journal to v11 and preserves a v3 backup", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-v4-migration-"));
 		temporaryDirectories.push(homeDirectory);
 		const directory = join(homeDirectory, ".coda", "sessions", "workspace-hash");
@@ -620,7 +651,7 @@ describe("JSONL File Session", () => {
 		});
 		await resumed.close();
 
-		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 10 });
+		expect(JSON.parse((await readFile(path, "utf8")).trim())).toMatchObject({ version: 11 });
 		expect(await readFile(`${path}.v3.backup`, "utf8")).toBe(legacyText);
 		expect(diagnostics).toContain("session.migrated");
 	});

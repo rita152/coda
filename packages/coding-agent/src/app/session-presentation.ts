@@ -10,6 +10,9 @@ export function createSessionPresentation(session: Session): SessionPresentation
 		get hasRetainedActivity() {
 			return session.hasRetainedActivity;
 		},
+		get title() {
+			return session.title;
+		},
 		get seed() {
 			return session.seed;
 		},

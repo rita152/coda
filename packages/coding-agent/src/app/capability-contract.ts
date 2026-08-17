@@ -342,7 +342,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Durable Sessions",
 		summary:
-			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, and Compaction Checkpoints.",
+			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, Compaction Checkpoints, and generated Session Titles.",
 		sources: [
 			"packages/coding-agent/src/session/file-session-manager.ts",
 			"packages/coding-agent/src/session/records.ts",
@@ -351,8 +351,15 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/src/session/session-lease.ts",
 			"packages/coding-agent/src/session/session-recovery.ts",
 			"packages/coding-agent/src/session/session-schema.ts",
+			"packages/coding-agent/src/session/session-title.ts",
 		],
-		tests: ["packages/coding-agent/test/session-file.test.ts", "packages/coding-agent/test/session-schema.test.ts"],
+		tests: [
+			"packages/coding-agent/test/session-application.test.ts",
+			"packages/coding-agent/test/session-file.test.ts",
+			"packages/coding-agent/test/session-schema.test.ts",
+			"packages/coding-agent/test/session-summary.test.ts",
+			"packages/coding-agent/test/session-title.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.skills",

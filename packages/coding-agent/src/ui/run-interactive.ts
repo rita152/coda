@@ -247,9 +247,7 @@ async function runMultiSessionInteractive(
 							pane.options.presentation.descriptor,
 							state.messages,
 							pane.options.presentation.composerSubmissions,
-							{
-								model: { provider: model.provider, id: model.id, api: model.api },
-							},
+							{ model: { provider: model.provider, id: model.id, api: model.api } },
 						),
 						options.clock.now(),
 					),
@@ -258,8 +256,10 @@ async function runMultiSessionInteractive(
 		}
 		return listed.map((entry) => {
 			const open = panes.get(entry.id);
+			const liveTitle = open?.options.presentation.title;
 			return Object.freeze({
 				...entry,
+				...(liveTitle ? { label: liveTitle } : {}),
 				status:
 					entry.id === activeId
 						? "current"

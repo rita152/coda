@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { isSessionRecordPayload } from "../src/session/session-schema.ts";
 
 describe("Session message schema", () => {
+	it("admits Session Titles only in the format that introduced them", () => {
+		const payload = { title: "Readable session picker" };
+		expect(isSessionRecordPayload("session_title_set", payload, 11)).toBe(true);
+		expect(isSessionRecordPayload("session_title_set", payload, 10)).toBe(false);
+		expect(isSessionRecordPayload("session_title_set", { title: "   " }, 11)).toBe(false);
+	});
+
 	it("admits Run Budget exhaustion only in the format that introduced it", () => {
 		const payload = { exhaustion: { limit: "model_attempts", maximum: 3, observed: 4 } };
 		expect(isSessionRecordPayload("run_budget_exhausted", payload, 10)).toBe(true);

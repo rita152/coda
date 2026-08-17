@@ -142,4 +142,110 @@ describe("Session application composition", () => {
 		expect(stdout.value).toBe("resumed\n");
 		expect(stderr.value).toBe("");
 	});
+
+	it("generates a Session Title and lists it from sessions", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-session-title-app-"));
+		temporaryDirectories.push(workspace);
+		const canonicalWorkspace = await realpath(workspace);
+		const workspaceId = createHash("sha256").update(canonicalWorkspace).digest("hex").slice(0, 32);
+		let id = 0;
+		const idGenerator: IdGenerator = { generate: (kind: IdKind) => `${kind}:${++id}` };
+		const sessions = new InMemorySessionManager({ clock: { now: () => 1_400 }, idGenerator });
+		const runtime = testTimeRuntime(1_400);
+		const faux = fauxProvider({ runtime, api: "openai-completions" });
+		const respond = (context: { tools?: unknown }) =>
+			context.tools === undefined
+				? fauxAssistantMessage("Readable session picker", { timestamp: 1_400 })
+				: fauxAssistantMessage("done", { timestamp: 1_400 });
+		faux.setResponses([respond, respond]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		const application = createCodingAgentApplication({
+			models,
+			sessions,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: canonicalWorkspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 1_400 },
+				idGenerator,
+			},
+		});
+
+		const prompt = "Please implement a readable session picker for the /session command";
+		await expect(
+			application.run([
+				"--print",
+				"--session",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				prompt,
+			]),
+		).resolves.toBe(0);
+		expect(stderr.value).toBe("");
+		expect(stdout.value).toBe("done\n");
+
+		const [summary] = await sessions.listSummaries({ id: workspaceId, path: canonicalWorkspace });
+		expect(summary?.title).toBe("Readable session picker");
+		expect(summary?.title).not.toBe(prompt);
+
+		stdout.value = "";
+		await expect(application.run(["sessions", "--workspace", canonicalWorkspace])).resolves.toBe(0);
+		expect(stdout.value).toContain("Readable session picker");
+		expect(stdout.value).not.toContain(prompt);
+	});
+
+	it("keeps the first Prompt as the listing title when the Model protocol cannot generate one", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-session-title-fallback-"));
+		temporaryDirectories.push(workspace);
+		const canonicalWorkspace = await realpath(workspace);
+		const workspaceId = createHash("sha256").update(canonicalWorkspace).digest("hex").slice(0, 32);
+		let id = 0;
+		const idGenerator: IdGenerator = { generate: (kind: IdKind) => `${kind}:${++id}` };
+		const sessions = new InMemorySessionManager({ clock: { now: () => 1_401 }, idGenerator });
+		const runtime = testTimeRuntime(1_401);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([fauxAssistantMessage("done", { timestamp: 1_401 })]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		const application = createCodingAgentApplication({
+			models,
+			sessions,
+			settings: { load: async () => ({}), save: async () => undefined },
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: canonicalWorkspace,
+				homeDirectory: tmpdir(),
+				platform: "darwin",
+				environment: {},
+				clock: { now: () => 1_401 },
+				idGenerator,
+			},
+		});
+
+		const prompt = "Please implement a readable session picker for the /session command";
+		await expect(
+			application.run([
+				"--print",
+				"--session",
+				"--model",
+				`${faux.getModel().provider}/${faux.getModel().id}`,
+				prompt,
+			]),
+		).resolves.toBe(0);
+		expect(faux.state.callCount).toBe(1);
+		const [summary] = await sessions.listSummaries({ id: workspaceId, path: canonicalWorkspace });
+		expect(summary?.title).toBe(prompt);
+	});
 });

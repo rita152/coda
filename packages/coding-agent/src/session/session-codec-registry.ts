@@ -44,6 +44,7 @@ const SESSION_MIGRATIONS = Object.freeze({
 	7: { to: 8, migrate: identityMigration },
 	8: { to: 9, migrate: identityMigration },
 	9: { to: 10, migrate: identityMigration },
+	10: { to: 11, migrate: identityMigration },
 } satisfies Readonly<Record<LegacySessionFormatVersion, SessionMigration>>);
 
 const RECORD_TYPES = new Set<string>(SESSION_RECORD_TYPES);

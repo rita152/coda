@@ -159,7 +159,7 @@ describe("Context Window Compaction", () => {
 		const [descriptor] = await sessions.list({ id: workspaceId, path: canonicalWorkspace });
 		expect(descriptor).toBeDefined();
 		const journal = await readFile(descriptor!.path!, "utf8");
-		expect(JSON.parse(journal.split("\n")[0]!)).toMatchObject({ version: 10 });
+		expect(JSON.parse(journal.split("\n")[0]!)).toMatchObject({ version: 11 });
 		expect(journal).toContain('"type":"context_compacted"');
 		expect(journal).toContain("resumed-old-tool-result:");
 

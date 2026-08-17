@@ -10,4 +10,6 @@ Session v4 adds `composer_submission_recorded` and `composer_submission_retracte
 
 Session v6 adds ordered Extension References to Composer Submission facts.
 
-Semantic Run, Attempt, Message, Tool, Follow-up, Composer Submission, Model, and Project Trust facts are durable. Streaming, rendering, active process state, and every User Shell command/output remain transient. Accepted Steering may appear in Prompt History but is never restored into an Agent queue.
+Session v11 adds `session_title_set`. A Session Title is recorded when a side Model call produces a sanitized label for the Session picker; it does not rewrite earlier Prompts or enter the Agent transcript.
+
+Semantic Run, Attempt, Message, Tool, Follow-up, Composer Submission, Model, Project Trust, and Session Title facts are durable. Streaming, rendering, active process state, and every User Shell command/output remain transient. Accepted Steering may appear in Prompt History but is never restored into an Agent queue.

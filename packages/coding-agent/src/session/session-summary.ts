@@ -17,6 +17,7 @@ export function summarizeSessionRecords(
 	const submissions = new Map<string, ComposerSubmission>();
 	let updatedAt = descriptor.createdAt;
 	let model: SessionSummaryModel | undefined;
+	let generatedTitle: string | undefined;
 
 	for (const record of records) {
 		updatedAt = Math.max(updatedAt, record.timestamp);
@@ -43,6 +44,9 @@ export function summarizeSessionRecords(
 			case "composer_submission_retracted":
 				submissions.delete(record.payload.id);
 				break;
+			case "session_title_set":
+				generatedTitle = normalizeTitle(record.payload.title);
+				break;
 			default:
 				break;
 		}
@@ -51,6 +55,7 @@ export function summarizeSessionRecords(
 	return summarizeSessionMessages(descriptor, messages, [...submissions.values()], {
 		updatedAt,
 		model,
+		...(generatedTitle ? { title: generatedTitle } : {}),
 	});
 }
 
@@ -59,7 +64,7 @@ export function summarizeSessionMessages(
 	descriptor: SessionDescriptor,
 	messages: readonly AgentMessage[],
 	composerSubmissions: readonly ComposerSubmission[] = [],
-	overrides: { readonly updatedAt?: number; readonly model?: SessionSummaryModel } = {},
+	overrides: { readonly updatedAt?: number; readonly model?: SessionSummaryModel; readonly title?: string } = {},
 ): SessionSummary {
 	let updatedAt = overrides.updatedAt ?? descriptor.createdAt;
 	let firstUserTitle: string | undefined;
@@ -80,7 +85,7 @@ export function summarizeSessionMessages(
 	const model = overrides.model ?? observedModel;
 	return Object.freeze({
 		descriptor: structuredClone(descriptor),
-		title: submissionTitles[0] ?? firstUserTitle ?? EMPTY_SESSION_TITLE,
+		title: overrides.title ?? submissionTitles[0] ?? firstUserTitle ?? EMPTY_SESSION_TITLE,
 		updatedAt,
 		promptCount: Math.max(promptCount, composerSubmissions.length),
 		...(model ? { model: Object.freeze({ ...model }) } : {}),

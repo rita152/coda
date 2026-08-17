@@ -170,7 +170,7 @@ describe("Coding Agent image attachments", () => {
 		const [descriptor] = await fixture.sessions!.list(fixture.workspace);
 		expect(descriptor).toBeDefined();
 		const journal = await readFile(descriptor!.path!, "utf8");
-		expect(JSON.parse(journal.split("\n")[0]!)).toMatchObject({ version: 10 });
+		expect(JSON.parse(journal.split("\n")[0]!)).toMatchObject({ version: 11 });
 		expect(journal).toContain('"type":"media"');
 		expect(journal).not.toContain('"data":');
 		const reference = JSON.parse(journal.split("\n").find((line) => line.includes('"type":"media"'))!).payload.message

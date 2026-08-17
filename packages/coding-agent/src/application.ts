@@ -45,6 +45,7 @@ import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
+import { summarizeSessionRecords } from "./session/session-summary.ts";
 import type { SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
@@ -154,19 +155,29 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 				if (cleanupExit) return await cleanupExit;
 				if (parsed.action === "sessions") {
 					const { workspace, workspaceId } = await resolveWorkspaceContext(parsed.workspace, options);
-					const descriptors = await sessions.list({ id: workspaceId, path: workspace.root });
+					const listed = { id: workspaceId, path: workspace.root };
+					const summaries = sessions.listSummaries
+						? await sessions.listSummaries(listed)
+						: (await sessions.list(listed)).map((descriptor) => summarizeSessionRecords(descriptor, []));
 					if (parsed.output === "json") {
-						for (const descriptor of descriptors) {
+						for (const summary of summaries) {
 							await options.io.stdout.write(
-								`${JSON.stringify({ schemaVersion: 1, type: "session", ...descriptor })}\n`,
+								`${JSON.stringify({
+									schemaVersion: 1,
+									type: "session",
+									title: summary.title,
+									updatedAt: summary.updatedAt,
+									promptCount: summary.promptCount,
+									...summary.descriptor,
+								})}\n`,
 							);
 						}
-					} else if (descriptors.length === 0) {
+					} else if (summaries.length === 0) {
 						await options.io.stdout.write("(no Sessions)\n");
 					} else {
-						for (const descriptor of descriptors) {
+						for (const summary of summaries) {
 							await options.io.stdout.write(
-								`${descriptor.id}\t${new Date(descriptor.createdAt).toISOString()}\t${descriptor.workspace.path}\n`,
+								`${summary.title}\t${summary.descriptor.id}\t${new Date(summary.updatedAt).toISOString()}\n`,
 							);
 						}
 					}

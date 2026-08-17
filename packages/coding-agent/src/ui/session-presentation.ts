@@ -4,6 +4,7 @@ export type SessionPresentation = Pick<
 	Session,
 	| "descriptor"
 	| "hasRetainedActivity"
+	| "title"
 	| "seed"
 	| "recoverableFollowUps"
 	| "composerSubmissions"
