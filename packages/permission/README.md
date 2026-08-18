@@ -9,7 +9,8 @@ optional filesystem bounds, and remembered decisions. The policy returns
 rules: untrusted auto-allows known-safe read-only Shell; on-request asks only
 for dangerous commands, `sandbox_permissions` overrides, or writes outside
 writable roots; never never asks and denies those same escalations. `with_additional_permissions`
-is only valid under on-request and requires non-empty `additional_permissions`. `justification`
+is only valid under on-request and requires non-empty `additional_permissions`. `require_escalated`
+and other sandbox overrides are also only valid under on-request. `justification`
 requires an explicit `sandbox_permissions`. Double-quoted
 expansions are not known-safe. Restricted writes and non-known-safe Shell
 auto-allow only while Process Confinement is actually enforcing the boundary.

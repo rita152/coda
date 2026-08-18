@@ -117,6 +117,28 @@ describe("PermissionLifecycleHookHost", () => {
 		).resolves.toEqual({ continue: false, reason: "stay confined" });
 	});
 
+	it("denies require_escalated when approval is never", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({
+				approvalPolicy: "never",
+				filesystemAccess: "restricted",
+			}),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "print-escalate",
+				toolInput: { command: "curl example.test", sandbox_permissions: "require_escalated" },
+			}),
+		).resolves.toEqual({
+			continue: false,
+			reason:
+				"approval policy is Never; reject command — you should not ask for escalated permissions if the approval policy is Never",
+		});
+	});
+
 	it("rejects with_additional_permissions when additional_permissions are missing", async () => {
 		const host = new PermissionLifecycleHookHost({
 			inner: inner({ continue: true }),

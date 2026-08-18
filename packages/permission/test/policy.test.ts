@@ -44,6 +44,13 @@ describe("Command Permission policy", () => {
 			kind: "ask",
 			prompt: "Allow process?\nnpm test",
 		});
+		expect(
+			policy.decide(request("bash", { command: "curl example.test", sandbox_permissions: "require_escalated" })),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is UnlessTrusted; reject command — you should not ask for escalated permissions if the approval policy is UnlessTrusted",
+		});
 	});
 
 	it("under on-request lets the sandbox enforce restricted Shell and only asks for danger or escalation", () => {
@@ -101,6 +108,13 @@ describe("Command Permission policy", () => {
 		expect(restricted.decide(request("write", { path: "/etc/passwd" }))).toEqual({
 			kind: "deny",
 			reason: WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
+		});
+		expect(
+			restricted.decide(request("bash", { command: "curl example.test", sandbox_permissions: "require_escalated" })),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is Never; reject command — you should not ask for escalated permissions if the approval policy is Never",
 		});
 
 		const readOnly = createCommandPermissionPolicy({

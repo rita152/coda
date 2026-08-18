@@ -169,6 +169,7 @@ function assessExec(
 		return approvalPolicy === "never" ? { kind: "deny", reason: NEVER_PROMPT_REASON } : ask(request);
 	}
 	if (approvalPolicy === "never") {
+		if (override) return { kind: "deny", reason: NEVER_PROMPT_REASON };
 		if (filesystemAccess === "restricted" && filesystemEnforced === false) {
 			return { kind: "deny", reason: NEVER_PROMPT_REASON };
 		}

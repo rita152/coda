@@ -52,5 +52,9 @@ export function sandboxPermissionRequestReason(
 	if (additionalPermissions !== undefined) {
 		return "`additional_permissions` requires `sandbox_permissions` set to `with_additional_permissions`";
 	}
+	if (sandboxPermissions === "require_escalated" && approvalPolicy !== "on-request") {
+		const label = approvalPolicyDebugName(approvalPolicy);
+		return `approval policy is ${label}; reject command — you should not ask for escalated permissions if the approval policy is ${label}`;
+	}
 	return undefined;
 }
