@@ -3,7 +3,6 @@ import { type JsonValue, Type } from "@coda/ai";
 import type { ProcessConfinement } from "@coda/sandbox";
 import { type HostProcessRuntime, hostProcessEnvironment } from "../host/runtime.ts";
 import type { Workspace } from "../host/workspace.ts";
-import { toolFailure } from "../tools/failure.ts";
 import type { ProcessSessionManager, ProcessSessionSnapshot, ProcessSessionState } from "./process-session-manager.ts";
 
 const ProcessParameters = Type.Object(
@@ -49,6 +48,21 @@ const ProcessParameters = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+
+function processToolFailure(
+	content: string,
+	details: { readonly code: string; readonly action: string },
+): ToolExecutionOutput {
+	return {
+		content,
+		observation: {
+			status: "error",
+			truncated: false,
+			facts: { code: details.code },
+		},
+		details: { ...details, status: "failed" },
+	};
+}
 
 function observationStatus(state: ProcessSessionState): "ok" | "error" {
 	if (state === "failed" || state === "stale") return "error";
@@ -101,7 +115,7 @@ function snapshotOutput(
 
 function requiredProcessId(action: string, processId: string | undefined): string | ToolExecutionOutput {
 	if (typeof processId !== "string" || processId.length === 0) {
-		return toolFailure(`process action=${action} requires processId`, { code: "invalid_arguments", action });
+		return processToolFailure(`process action=${action} requires processId`, { code: "invalid_arguments", action });
 	}
 	return processId;
 }
@@ -142,7 +156,7 @@ export function createProcessTool(options: {
 					const processId = requiredProcessId("write", arguments_.processId);
 					if (typeof processId !== "string") return processId;
 					if (typeof arguments_.input !== "string") {
-						return toolFailure("process action=write requires input", {
+						return processToolFailure("process action=write requires input", {
 							code: "invalid_arguments",
 							action: "write",
 						});
@@ -194,7 +208,10 @@ async function startProcess(
 	context: Parameters<AgentTool["execute"]>[1],
 ): Promise<ToolExecutionOutput> {
 	if (typeof command !== "string" || command.length === 0) {
-		return toolFailure("process action=start requires command", { code: "invalid_arguments", action: "start" });
+		return processToolFailure("process action=start requires command", {
+			code: "invalid_arguments",
+			action: "start",
+		});
 	}
 	const environment = hostProcessEnvironment(options.runtime);
 	try {
