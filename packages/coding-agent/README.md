@@ -129,7 +129,7 @@ configuration fields.
 The Composer's borderless upper list exposes the core Slash commands:
 
 <!-- coda:core-commands:start -->
-Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/hooks`, `/permissions`, `/session`, `/new`, and `/follow-up`.
+Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/hooks`, `/permissions`, `/session`, `/cancel-work`, `/new`, and `/follow-up`.
 <!-- coda:core-commands:end -->
 
 Selector commands open nested menus and do not accept
@@ -171,7 +171,8 @@ and active counts for every event, source paths, matchers, trust state, and
 configuration diagnostics.
 
 The implemented events are `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse`, `PreCompact`, `PostCompact`, `Stop`, and `SessionEnd`.
+`PostToolUse`, `PreCompact`, `PostCompact`, `Stop`, `SessionEnd`,
+`SubagentStart`, and `SubagentStop`.
 Command Permission hangs on `PreToolUse` and can resolve a hook
 `permissionDecision:ask` before the runtime sees the outcome. Approval Policy
 is `untrusted`, `on-request`, or `never` (`--ask-for-approval`). `/permissions`
@@ -179,8 +180,10 @@ changes that policy together with Process Confinement Mode for the current
 Session. Print mode defaults Approval Policy to `never` and denies unresolved
 asks, matching Codex exec. `--strict-permissions` keeps that deny path when
 `--ask-for-approval` is set in print mode.
-`PermissionRequest`, `SubagentStart`, and `SubagentStop` remain recognized
-configuration events but are not executed.
+`SubagentStart` runs when a child Work Item enters `running`; `SubagentStop`
+runs when that child reaches a terminal state. Matcher input is the child's
+`executionMode`. `PermissionRequest` remains a recognized configuration event
+but is not executed.
 
 ```json
 {
@@ -330,7 +333,7 @@ This status block is generated from executable runtime contracts. See the
 - **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
-- **Lifecycle Hooks** (@coda/coding-agent) — Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, and Stop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation.
+- **Lifecycle Hooks** (@coda/coding-agent) — Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, Stop, and SubagentStart/SubagentStop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation. SubagentStart fires when a child Work Item enters running; SubagentStop fires at that child's terminal state.
 - **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, mention-gated Run admission, progress, cancellation, subscriptions, and form or URL Elicitation.
 - **Media Assets** (@coda/coding-agent) — Bounded image Attachments use content-addressed Session storage, model-ready renditions, Kitty previews, and a system-viewer fallback.
 - **Context Overflow fallback** (@coda/coding-agent) — After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.
@@ -342,7 +345,7 @@ This status block is generated from executable runtime contracts. See the
 - **Bounded Session history recovery** (@coda/coding-agent) — The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.
 - **Durable Sessions** (@coda/coding-agent) — Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, Compaction Checkpoints, and generated Session Titles. Current Session format: v11.
 - **Agent Skills** (@coda/skills) — Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, immutable per-Run catalogs that hide slash-only Skills, and both automatic skill Tool loading and explicit `$` injection.
-- **Terminal experience** (@coda/coding-agent) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill and MCP mentions, and Workspace-scoped `@` file mention completion, plus background Session activity.
+- **Terminal experience** (@coda/coding-agent) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill and MCP mentions, and Workspace-scoped `@` file mention completion, plus background Session activity. Parent Timeline and Activity project child Work Items under `delegate`.
 - **User Shell Adapter and input queues** (@coda/coding-agent) — Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter owns its local FIFO and submits Prompt, Steering, and Follow-up input through the public Work Item command seam.
 - **Offline Agent evaluation harness** (@coda/evals) — Deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, latency, tokens, and price data without network access.
 - **Durable Work Graph orchestration** (@coda/runtime) — A closed submit/observe/close Interface coordinates durable Work Graphs, deterministic DAG scheduling, bounded parallel Work Items, isolated Worker Sessions and observations, ordered causal control, cancellation, recovery, structured results, and pluggable Direct or Git-worktree Workspace Publication while keeping serial Worker Runtimes private.
@@ -360,7 +363,7 @@ This status block is generated from executable runtime contracts. See the
 
 - **Deferred model responses** (@coda/ai) — Fetching or cancelling deferred Provider responses has type-level representation but no supported OpenCode Go runtime implementation.
 - **Additional AI runtimes** (@coda/ai) — Complete OAuth, image generation, Providers beyond OpenCode Go or explicit custom Providers, and Browser or Bun entries are not implemented.
-- **Permission and delegated-worker Hooks** (@coda/coding-agent) — PermissionRequest remains a deferred hook event. Command Permission now resolves ask on PreToolUse. SubagentStart and SubagentStop stay inert until delegated-worker lifecycle exists.
+- **PermissionRequest Hook** (@coda/coding-agent) — PermissionRequest remains a deferred hook event. Command Permission resolves ask on PreToolUse.
 - **Remote application interfaces** (@coda/coding-agent) — RPC, client/server mode, and a public Coding Agent SDK are not implemented.
 - **Advanced editing** (@coda/tui) — Autocomplete, selection, clipboard protocols, redo, durable drafts, and syntax highlighting are not implemented.
 - **Additional MCP primitives** (@coda/mcp) — Resources, Prompts, Roots, Sampling, Logging, complete OAuth, and legacy HTTP+SSE transport are outside the current MCP Host.

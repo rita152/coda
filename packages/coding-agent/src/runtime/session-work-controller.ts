@@ -11,6 +11,7 @@ import {
 import type { Api, AuthResult, Model, ThinkingLevel } from "@coda/ai";
 import type {
 	CodingAgent,
+	CodingAgentObservation,
 	CodingAgentReceipt,
 	CodingAgentSnapshot,
 	DesiredRuntimeConfiguration,
@@ -18,6 +19,7 @@ import type {
 	WorkCapacityPolicy,
 	WorkGraphId,
 	WorkItemId,
+	WorkItemState,
 	WorkResult,
 	WorkspacePlacementDescriptor,
 } from "@coda/runtime";
@@ -38,6 +40,13 @@ export interface PreparedWorkRunMetadata {
 
 export interface BegunSessionWork {
 	readonly result: Promise<WorkResult>;
+}
+
+export interface DelegatedWorkItemProjection {
+	readonly itemId: WorkItemId | string;
+	readonly objective?: string;
+	readonly executionMode?: "read_only" | "write";
+	readonly state: WorkItemState;
 }
 
 export interface SessionWorkState {
@@ -69,10 +78,12 @@ export interface SessionWorkResynchronization {
 	readonly state: SessionWorkState;
 	readonly seed: AgentSeed;
 	readonly toolInvocations: readonly SessionToolLifecycle[];
+	readonly snapshot?: CodingAgentSnapshot;
 }
 
 export interface SessionWorkObserver {
 	accept(event: AgentEvent): Promise<void> | void;
+	acceptObservation?(observation: CodingAgentObservation): Promise<void> | void;
 	resynchronize(snapshot: SessionWorkResynchronization): Promise<void> | void;
 }
 
@@ -103,6 +114,7 @@ const TERMINAL_WORK_STATES: ReadonlySet<string> = new Set([
 
 type ObservationDelivery =
 	| { readonly type: "event"; readonly event: AgentEvent }
+	| { readonly type: "observation"; readonly observation: CodingAgentObservation }
 	| { readonly type: "resync"; readonly snapshot: SessionWorkResynchronization };
 
 interface ObservationSubscriber {
@@ -156,6 +168,8 @@ export class SessionWorkController {
 	#operation?: Promise<WorkResult>;
 	#closed = false;
 	#closeOperation?: Promise<void>;
+	#lastSnapshot?: CodingAgentSnapshot;
+	readonly #delegated = new Map<string, DelegatedWorkItemProjection>();
 
 	constructor(options: {
 		readonly host: SessionWorkHost;
@@ -254,6 +268,7 @@ export class SessionWorkController {
 					this.#activePlacement = undefined;
 					this.#activeRun = undefined;
 					this.#status = "idle";
+					this.#delegated.clear();
 				}
 			});
 		this.#operation = operation;
@@ -309,12 +324,29 @@ export class SessionWorkController {
 	async cancel(): Promise<void> {
 		this.#assertOpen();
 		if (!this.#activeGraphId) return;
+		await this.#cancel({ type: "graph", graphId: this.#activeGraphId });
+	}
+
+	async cancelItem(itemId: WorkItemId | string): Promise<void> {
+		this.#assertOpen();
+		if (!this.#activeGraphId) return;
+		await this.#cancel({ type: "item", graphId: this.#activeGraphId, itemId });
+	}
+
+	delegatedWorkItems(): readonly DelegatedWorkItemProjection[] {
+		return Object.freeze([...this.#delegated.values()].map((item) => Object.freeze({ ...item })));
+	}
+
+	async #cancel(
+		target:
+			| { readonly type: "graph"; readonly graphId: WorkGraphId }
+			| { readonly type: "item"; readonly graphId: WorkGraphId; readonly itemId: WorkItemId | string },
+	): Promise<void> {
 		const receipt = await this.#host.agent.submit({
 			commands: [
-				{
-					type: "cancel_work",
-					target: { type: "graph", graphId: this.#activeGraphId },
-				},
+				target.type === "graph"
+					? { type: "cancel_work", target: { type: "graph", graphId: target.graphId } }
+					: { type: "cancel_work", target: { type: "item", graphId: target.graphId, itemId: target.itemId } },
 			],
 		});
 		if (receipt.status === "rejected" && receipt.rejection.code !== "invalid_state") throw rejected(receipt);
@@ -338,6 +370,7 @@ export class SessionWorkController {
 			capacityName: "Session Work Observation",
 			deliver: (delivery) => {
 				if (delivery.type === "event") return observer.accept(delivery.event);
+				if (delivery.type === "observation") return observer.acceptObservation?.(delivery.observation);
 				return observer.resynchronize(delivery.snapshot);
 			},
 			onDeliveryError: () => this.#removeObservationSubscriber(subscriber),
@@ -371,6 +404,42 @@ export class SessionWorkController {
 	notePlacement(placement: WorkspacePlacementDescriptor): void {
 		if (!this.#activeGraphId || !this.#activeItemId) return;
 		this.#activePlacement = structuredClone(placement);
+	}
+
+	acceptObservation(observation: CodingAgentObservation): void {
+		if (this.#closed) return;
+		if (observation.type === "snapshot") {
+			this.#lastSnapshot = observation.snapshot;
+			this.#delegated.clear();
+			for (const graph of observation.snapshot.graphs) {
+				if (this.#activeGraphId && graph.graphId !== this.#activeGraphId) continue;
+				for (const item of graph.items) {
+					if (item.parentItemId === undefined) continue;
+					this.#delegated.set(String(item.itemId), {
+						itemId: item.itemId,
+						objective: item.objective,
+						executionMode: item.executionMode,
+						state: item.state,
+					});
+				}
+			}
+		} else if (observation.type === "item_state_changed" && !this.#isRootItem(observation.itemId)) {
+			const current = this.#delegated.get(String(observation.itemId));
+			this.#delegated.set(String(observation.itemId), {
+				itemId: observation.itemId,
+				...(current?.objective ? { objective: current.objective } : {}),
+				...(current?.executionMode ? { executionMode: current.executionMode } : {}),
+				state: observation.to,
+			});
+		} else if (observation.type === "work_item_settled" && !this.#isRootItem(observation.result.itemId)) {
+			this.#delegated.set(String(observation.result.itemId), {
+				itemId: observation.result.itemId,
+				state: observation.result.state,
+			});
+		}
+		for (const subscriber of this.#observationSubscribers) {
+			this.#enqueueObservation(subscriber, { type: "observation", observation });
+		}
 	}
 
 	acceptWorkerEvent(event: AgentEvent, identity: WorkerObservationIdentity): void {
@@ -430,6 +499,7 @@ export class SessionWorkController {
 
 	resynchronize(snapshot: CodingAgentSnapshot): void {
 		if (this.#closed) return;
+		this.#lastSnapshot = snapshot;
 		const active = snapshot.graphs
 			.flatMap((graph) => graph.items.map((item) => ({ graph, item })))
 			.find(({ item }) => item.sessionId === this.sessionId && !TERMINAL_WORK_STATES.has(item.state));
@@ -486,6 +556,7 @@ export class SessionWorkController {
 			state: this.state(),
 			seed: structuredClone(this.#session.seed),
 			toolInvocations: Object.freeze(structuredClone(this.#session.toolInvocations)),
+			...(this.#lastSnapshot ? { snapshot: structuredClone(this.#lastSnapshot) } : {}),
 		});
 	}
 
@@ -537,5 +608,9 @@ export class SessionWorkController {
 
 	#assertOpen(): void {
 		if (this.#closed) throw new Error(`Session Work Controller ${this.sessionId} is closed`);
+	}
+
+	#isRootItem(itemId: WorkItemId | string): boolean {
+		return itemId === this.#activeItemId || String(itemId) === "root";
 	}
 }

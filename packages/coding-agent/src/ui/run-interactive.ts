@@ -17,6 +17,7 @@ import {
 	createAuthCommandFlow,
 	createProviderAuthFlow,
 } from "../commands/auth-flow.ts";
+import { createCancelWorkCommandFlow } from "../commands/cancel-work-flow.ts";
 import { createContextOverflowFlow } from "../commands/context-overflow-flow.ts";
 import { createEffortCommandFlow } from "../commands/effort-flow.ts";
 import type { CommandFlowNavigation, CommandFlowOpener } from "../commands/flow-types.ts";
@@ -180,7 +181,14 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly diagnostics?: DiagnosticSink;
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
-	readonly commandPermission?: { bind(tui: Tui, terminal: Terminal): void; unbind(): void };
+	readonly commandPermission?: {
+		bind(
+			tui: Tui,
+			terminal: Terminal,
+			onWait?: (request: { readonly sessionId: string; readonly toolName: string }, waiting: boolean) => void,
+		): void;
+		unbind(): void;
+	};
 	readonly motion: "full" | "reduced";
 	readonly commandRegistry?: CommandRegistry;
 	readonly fileMentionSearch?: WorkspaceFileSearch;
@@ -503,6 +511,10 @@ async function runMultiSessionInteractive(
 					openPermissionsCommand(flow, sessionOptions.permissionsCommand);
 					return;
 				}
+				if (commandId === "core:cancel-work") {
+					openCancelWorkCommand(flow, sessionOptions.work);
+					return;
+				}
 				if (commandId === "core:session") {
 					flow.open(
 						createSessionCommandFlow({
@@ -571,8 +583,11 @@ async function runMultiSessionInteractive(
 					}
 				}
 			},
-			resynchronize: ({ seed, toolInvocations, state }) => {
-				component.resynchronize(seed, toolInvocations, state.status === "running");
+			acceptObservation: (observation) => {
+				component.acceptObservation(observation);
+			},
+			resynchronize: ({ seed, toolInvocations, state, snapshot }) => {
+				component.resynchronize(seed, toolInvocations, state.status === "running", snapshot);
 				acceptLatestRunEvidence(component, sessionOptions.presentation);
 				void git.refresh();
 				pane.contextOverflowPending = false;
@@ -662,7 +677,16 @@ async function runMultiSessionInteractive(
 			});
 		},
 	});
-	options.commandPermission?.bind(tui, options.terminal);
+	options.commandPermission?.bind(tui, options.terminal, (request, waiting) => {
+		const pane = panes.get(request.sessionId) ?? panes.active;
+		if (!pane) return;
+		pane.component.setActivityOverride(
+			`permission:${request.sessionId}:${request.toolName}`,
+			`Waiting for Command Permission — ${request.toolName}`,
+			waiting,
+		);
+		if (waiting && pane !== panes.active) pane.needsAttention = true;
+	});
 	options.mcpElicitation?.bind(tui, options.terminal, (request, sessionId, waiting) => {
 		const pane = sessionId ? panes.get(sessionId) : panes.active;
 		if (!pane) return;
@@ -859,6 +883,10 @@ async function runSingleSessionInteractive(
 				openPermissionsCommand(flow, options.permissionsCommand);
 				return;
 			}
+			if (commandId === "core:cancel-work") {
+				openCancelWorkCommand(flow, options.work);
+				return;
+			}
 			throw new Error(`Command is not available yet: ${commandId}`);
 		},
 		onResumeFollowUps: () => inputController.resumeQueue(),
@@ -923,7 +951,13 @@ async function runSingleSessionInteractive(
 			});
 		},
 	});
-	options.commandPermission?.bind(tui, options.terminal);
+	options.commandPermission?.bind(tui, options.terminal, (request, waiting) => {
+		component.setActivityOverride(
+			`permission:${request.sessionId}:${request.toolName}`,
+			`Waiting for Command Permission — ${request.toolName}`,
+			waiting,
+		);
+	});
 	options.mcpElicitation?.bind(tui, options.terminal, (request, _sessionId, waiting) => {
 		component.setActivityOverride(
 			`mcp:${request.execution.invocationId}`,
@@ -942,8 +976,11 @@ async function runSingleSessionInteractive(
 			if (event.type === "run_end") acceptLatestRunEvidence(component, options.presentation, event.runId);
 			if (event.type === "tool_execution_end" || event.type === "tool_execution_rejected") void git.refresh();
 		},
-		resynchronize: ({ seed, toolInvocations, state }) => {
-			component.resynchronize(seed, toolInvocations, state.status === "running");
+		acceptObservation: (observation) => {
+			component.acceptObservation(observation);
+		},
+		resynchronize: ({ seed, toolInvocations, state, snapshot }) => {
+			component.resynchronize(seed, toolInvocations, state.status === "running", snapshot);
 			acceptLatestRunEvidence(component, options.presentation);
 			void git.refresh();
 		},
@@ -1019,6 +1056,17 @@ function assertEmptyReplacementSession(
 	) {
 		throw new Error("Context Overflow replacement Session runtime is not empty");
 	}
+}
+
+function openCancelWorkCommand(flow: CommandFlowOpener, work: SessionWorkController): void {
+	flow.open(
+		createCancelWorkCommandFlow({
+			graphActive: work.state().activeGraphId !== undefined,
+			children: work.delegatedWorkItems(),
+			onCancelGraph: () => work.cancel(),
+			onCancelItem: (itemId) => work.cancelItem(itemId),
+		}),
+	);
 }
 
 function acceptLatestRunEvidence(component: ChatComponent, presentation: SessionPresentation, runId?: string): void {

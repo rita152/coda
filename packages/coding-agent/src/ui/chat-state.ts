@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentSeed } from "@coda/agent";
+import type { CodingAgentObservation, CodingAgentSnapshot } from "@coda/runtime";
 import type { Clock, ColorLevel, RenderContext } from "@coda/tui";
 import type { RunEvidenceEnvelope } from "../run-evidence/run-evidence.ts";
 import type { SessionToolLifecycle } from "../session/types.ts";
@@ -43,6 +44,7 @@ export type ChatStateMutation =
 			readonly seed: AgentSeed;
 			readonly toolInvocations: readonly SessionToolLifecycle[];
 			readonly running: boolean;
+			readonly snapshot?: CodingAgentSnapshot;
 	  }
 	| { readonly type: "begin_agent_preparation" }
 	| { readonly type: "cancel_agent_preparation" }
@@ -51,6 +53,7 @@ export type ChatStateMutation =
 
 export type ChatStateProjection =
 	| { readonly type: "agent_event"; readonly event: AgentEvent }
+	| { readonly type: "observation"; readonly observation: CodingAgentObservation }
 	| { readonly type: "user_shell"; readonly snapshot: UserShellSnapshot };
 
 export type ChatStateHostMutation =
@@ -147,6 +150,18 @@ export class ChatStateController {
 				this.#timeline = new SemanticTimeline(mutation.seed, mutation.toolInvocations);
 				this.#activity = new ActivityProjection(this.#activitySummaryMode);
 				this.#agentRunning = mutation.running;
+				if (mutation.snapshot) {
+					this.#timeline.resynchronizeObservation({
+						type: "snapshot",
+						sequence: 0,
+						snapshot: mutation.snapshot,
+					});
+					this.#activity.acceptObservation({
+						type: "snapshot",
+						sequence: 0,
+						snapshot: mutation.snapshot,
+					});
+				}
 				this.#host.mutate({ type: "project_composer", projection: { type: "resynchronize" } });
 				this.#host.mutate({ type: "reset_timeline_caches" });
 				this.#host.mutate({ type: "invalidate" });
@@ -174,6 +189,9 @@ export class ChatStateController {
 			case "agent_event":
 				this.#acceptAgentEvent(projection.event);
 				return;
+			case "observation":
+				this.#acceptObservation(projection.observation);
+				return;
 			case "user_shell":
 				this.#acceptUserShell(projection.snapshot);
 				return;
@@ -196,6 +214,13 @@ export class ChatStateController {
 			if (remaining > 0) intervals.push(remaining);
 		}
 		return intervals.length > 0 ? Math.min(...intervals) : undefined;
+	}
+
+	#acceptObservation(observation: CodingAgentObservation): void {
+		const timelineChanged = this.#timeline.acceptObservation(observation).changed;
+		this.#activity.acceptObservation(observation);
+		if (timelineChanged) this.#host.mutate({ type: "note_timeline_update" });
+		this.#host.mutate({ type: "invalidate" });
 	}
 
 	#acceptAgentEvent(event: AgentEvent): void {

@@ -1,5 +1,6 @@
 import type { AgentEvent } from "@coda/agent";
 import type { Api } from "@coda/ai";
+import type { CodingAgentObservation, WorkItemState } from "@coda/runtime";
 import { sanitizeTerminalText } from "@coda/tui";
 import type { UserShellSnapshot } from "./user-shell.ts";
 
@@ -35,6 +36,13 @@ interface ActivityOverride {
 	readonly order: number;
 }
 
+const TERMINAL_WORK_ITEM_STATES: ReadonlySet<WorkItemState> = new Set([
+	"succeeded",
+	"failed",
+	"canceled",
+	"interrupted",
+	"blocked",
+]);
 const MAX_PROVIDER_SUMMARY_CHARACTERS = 120;
 const ACTION_SUMMARY_PATTERN =
 	/^(?:let me\b|i(?:['’]ll|\s+(?:will|am|need to|should|can))\b|we(?:['’]ll|\s+(?:will|are|need to|should|can))\b|next\b|now\b|(?:analyzing|checking|comparing|debugging|exploring|fixing|implementing|inspecting|investigating|looking|planning|preparing|reading|reviewing|running|searching|testing|updating|verifying)\b)/iu;
@@ -66,6 +74,8 @@ export class ActivityProjection {
 	#shell?: ShellActivity;
 	readonly #overrides = new Map<string, ActivityOverride>();
 	#overrideOrder = 0;
+	readonly #rootItemIds = new Set<string>();
+	readonly #delegated = new Map<string, WorkItemState>();
 
 	constructor(summaryMode: ActivitySummaryMode = "fallback") {
 		this.#selectedSummaryMode = summaryMode;
@@ -149,6 +159,44 @@ export class ActivityProjection {
 		this.#noteEvent(at);
 	}
 
+	acceptObservation(observation: CodingAgentObservation): void {
+		switch (observation.type) {
+			case "item_state_changed": {
+				const itemId = String(observation.itemId);
+				if (itemId === "root" || this.#rootItemIds.has(itemId)) break;
+				this.#delegated.set(itemId, observation.to);
+				this.#noteEvent(0);
+				break;
+			}
+			case "work_item_settled": {
+				const itemId = String(observation.result.itemId);
+				if (observation.result.parentItemId === undefined) {
+					this.#rootItemIds.add(itemId);
+					this.#delegated.delete(itemId);
+				} else {
+					this.#delegated.set(itemId, observation.result.state);
+				}
+				this.#noteEvent(observation.result.timing.settledAt);
+				break;
+			}
+			case "snapshot": {
+				this.#rootItemIds.clear();
+				this.#delegated.clear();
+				for (const graph of observation.snapshot.graphs) {
+					this.#rootItemIds.add(String(graph.rootItemId));
+					for (const item of graph.items) {
+						if (item.parentItemId === undefined) continue;
+						this.#delegated.set(String(item.itemId), item.state);
+					}
+				}
+				this.#noteEvent(0);
+				break;
+			}
+			default:
+				break;
+		}
+	}
+
 	acceptUserShell(snapshot: UserShellSnapshot, at: number): void {
 		this.#noteEvent(at);
 		if (snapshot.status === "running") {
@@ -186,6 +234,15 @@ export class ActivityProjection {
 				text: `Running ${this.#shell.command || "command"}`,
 				motion: "active",
 				startedAt: this.#shell.startedAt,
+				lastEventAt,
+			};
+		}
+		const waiting = [...this.#delegated.values()].filter((state) => !TERMINAL_WORK_ITEM_STATES.has(state)).length;
+		if (waiting > 0) {
+			return {
+				text: `Waiting for ${waiting} child Work Item${waiting === 1 ? "" : "s"}`,
+				motion: "waiting",
+				startedAt: this.#phaseStartedAt ?? now,
 				lastEventAt,
 			};
 		}
@@ -229,6 +286,8 @@ export class ActivityProjection {
 		this.#phaseStartedAt = undefined;
 		this.#retry = undefined;
 		this.#overrides.clear();
+		this.#rootItemIds.clear();
+		this.#delegated.clear();
 		this.#clearSummary();
 	}
 

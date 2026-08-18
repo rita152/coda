@@ -12,6 +12,7 @@ import type {
 	PostToolUseHookOutcome,
 	PreToolUseHookOutcome,
 	StopHookOutcome,
+	SubagentHookContext,
 	UserPromptSubmitHookOutcome,
 } from "@coda/runtime";
 import type { ProcessRunner, ProcessRunResult } from "../host/process-runner.ts";
@@ -297,6 +298,30 @@ function parseSuccessfulOutput(event: LifecycleHookEventName, stdout: string): P
 			return { ...common, ...warningFields(common.warning, invalidSpecific) };
 		case "SessionEnd":
 			return { continue: true };
+		case "SubagentStart": {
+			const additionalContext = nonEmpty(specific?.additionalContext);
+			return {
+				continue: true,
+				...(additionalContext ? { additionalContext } : {}),
+				...warningFields(invalidSpecific),
+			};
+		}
+		case "SubagentStop": {
+			if (!common.continue) return { ...common, ...warningFields(common.warning, invalidSpecific) };
+			const continuation = value.decision === "block" ? nonEmpty(value.reason) : undefined;
+			const invalid =
+				invalidSpecific ??
+				(value.decision === "block" && continuation === undefined
+					? "SubagentStop hook returned decision:block without a non-empty reason"
+					: value.decision !== undefined && value.decision !== "block"
+						? `SubagentStop hook returned unsupported decision:${String(value.decision)}`
+						: undefined);
+			return {
+				...common,
+				...(!invalid && continuation ? { continuation } : {}),
+				...warningFields(common.warning, invalid),
+			};
+		}
 	}
 }
 
@@ -306,10 +331,10 @@ function parseCompleted(event: LifecycleHookEventName, result: ProcessRunResult)
 		return event === "SessionEnd" ? { continue: true } : parseSuccessfulOutput(event, result.stdout);
 	if (result.exitCode === 2) {
 		const reason = nonEmpty(result.stderr);
-		if (event === "Stop") {
+		if (event === "Stop" || event === "SubagentStop") {
 			return reason
 				? { continue: true, continuation: reason }
-				: { continue: true, warning: "Stop hook exited 2 without a continuation prompt" };
+				: { continue: true, warning: `${event} hook exited 2 without a continuation prompt` };
 		}
 		if (event === "PostToolUse") {
 			return reason
@@ -553,6 +578,84 @@ export class CommandLifecycleHookHost implements LifecycleHookHost {
 			...(stopped?.reason ? { reason: stopped.reason } : {}),
 			...(continuations.length > 0 ? { continuation: continuations.join("\n\n") } : {}),
 		};
+	}
+
+	async subagentStart(context: SubagentHookContext): Promise<UserPromptSubmitHookOutcome> {
+		this.#ensureSession({
+			sessionId: context.childSessionId,
+			cwd: context.cwd,
+			model: context.model,
+			...(context.agentTranscriptPath ? { transcriptPath: context.agentTranscriptPath } : {}),
+		});
+		const parsed = await this.#dispatch(
+			"SubagentStart",
+			{ sessionId: context.childSessionId, cwd: context.cwd },
+			[context.agentType],
+			{
+				session_id: context.sessionId,
+				transcript_path: context.transcriptPath ?? null,
+				cwd: context.cwd,
+				hook_event_name: "SubagentStart",
+				model: context.model,
+				permission_mode: this.#permissionMode,
+				agent_id: context.agentId,
+				agent_type: context.agentType,
+			},
+		);
+		this.#queueContext(context.childSessionId, parsed);
+		return {
+			continue: true,
+			additionalContext: Object.freeze(
+				parsed.flatMap((output) => (output.additionalContext ? [output.additionalContext] : [])),
+			),
+		};
+	}
+
+	async subagentStop(
+		context: SubagentHookContext & {
+			readonly stopHookActive: boolean;
+			readonly lastAssistantMessage?: string;
+		},
+	): Promise<StopHookOutcome> {
+		this.#ensureSession({
+			sessionId: context.childSessionId,
+			cwd: context.cwd,
+			model: context.model,
+			...(context.agentTranscriptPath ? { transcriptPath: context.agentTranscriptPath } : {}),
+		});
+		const parsed = await this.#dispatch(
+			"SubagentStop",
+			{ sessionId: context.childSessionId, cwd: context.cwd },
+			[context.agentType],
+			{
+				session_id: context.sessionId,
+				transcript_path: context.transcriptPath ?? null,
+				cwd: context.cwd,
+				hook_event_name: "SubagentStop",
+				model: context.model,
+				permission_mode: this.#permissionMode,
+				agent_id: context.agentId,
+				agent_type: context.agentType,
+				agent_transcript_path: context.agentTranscriptPath ?? null,
+				stop_hook_active: context.stopHookActive,
+				last_assistant_message: context.lastAssistantMessage ?? null,
+			},
+		);
+		const stopped = parsed.find((output) => !output.continue);
+		const continuations = parsed.flatMap((output) => (output.continuation ? [output.continuation] : []));
+		return {
+			continue: stopped === undefined,
+			...(stopped?.reason ? { reason: stopped.reason } : {}),
+			...(continuations.length > 0 ? { continuation: continuations.join("\n\n") } : {}),
+		};
+	}
+
+	#ensureSession(context: LifecycleHookSessionContext): void {
+		if (this.#sessions.has(context.sessionId)) return;
+		this.#sessions.set(context.sessionId, {
+			...context,
+			pendingContext: [],
+		});
 	}
 
 	takeAdditionalContext(sessionId: string): readonly string[] {

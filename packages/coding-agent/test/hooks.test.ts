@@ -267,6 +267,90 @@ describe("CommandLifecycleHookHost", () => {
 		expect(preview).not.toContain(complete.trim());
 	});
 
+	it("dispatches SubagentStart with parent session_id and executionMode matcher", async () => {
+		const requests: ProcessRunRequest[] = [];
+		const hooks = host(
+			[
+				handler("SubagentStart", "start-write", { matcher: "write" }),
+				handler("SubagentStart", "start-read", { matcher: "read_only" }),
+			],
+			async (request) => {
+				requests.push(request);
+				return result({
+					stdout: JSON.stringify({
+						hookSpecificOutput: {
+							hookEventName: "SubagentStart",
+							additionalContext: "child guidance",
+						},
+					}),
+				});
+			},
+		);
+		await hooks.subagentStart({
+			sessionId: "session-parent",
+			childSessionId: "session-child",
+			cwd: "/workspace",
+			model: "model-1",
+			agentId: "alpha",
+			agentType: "write",
+		});
+		expect(requests).toHaveLength(1);
+		expect(JSON.parse(String(requests[0]?.stdin))).toMatchObject({
+			session_id: "session-parent",
+			hook_event_name: "SubagentStart",
+			agent_id: "alpha",
+			agent_type: "write",
+			model: "model-1",
+		});
+		expect(hooks.takeAdditionalContext("session-child")).toEqual(["child guidance"]);
+	});
+
+	it("ignores SubagentStart continue:false and matches SubagentStop to Stop algebra", async () => {
+		const startHooks = host([handler("SubagentStart", "start")], async () =>
+			result({ stdout: JSON.stringify({ continue: false, stopReason: "should not block start" }) }),
+		);
+		await expect(
+			startHooks.subagentStart({
+				sessionId: "session-parent",
+				childSessionId: "session-child",
+				cwd: "/workspace",
+				model: "model-1",
+				agentId: "alpha",
+				agentType: "write",
+			}),
+		).resolves.toEqual({ continue: true, additionalContext: [] });
+
+		const stopRequests: ProcessRunRequest[] = [];
+		const stopHooks = host([handler("SubagentStop", "stop", { matcher: "write" })], async (request) => {
+			stopRequests.push(request);
+			return result({
+				stdout: JSON.stringify({ decision: "block", reason: "look again" }),
+			});
+		});
+		await expect(
+			stopHooks.subagentStop({
+				sessionId: "session-parent",
+				childSessionId: "session-child",
+				cwd: "/workspace",
+				model: "model-1",
+				agentId: "alpha",
+				agentType: "write",
+				stopHookActive: false,
+				lastAssistantMessage: "alpha done",
+				agentTranscriptPath: "/child.jsonl",
+			}),
+		).resolves.toEqual({ continue: true, continuation: "look again" });
+		expect(JSON.parse(String(stopRequests[0]?.stdin))).toMatchObject({
+			session_id: "session-parent",
+			hook_event_name: "SubagentStop",
+			agent_id: "alpha",
+			agent_type: "write",
+			agent_transcript_path: "/child.jsonl",
+			stop_hook_active: false,
+			last_assistant_message: "alpha done",
+		});
+	});
+
 	it("queues background handlers after eight active commands instead of dropping them", async () => {
 		let active = 0;
 		let maximumActive = 0;
@@ -331,8 +415,9 @@ describe("Hook configuration discovery", () => {
 						},
 					],
 					PermissionRequest: [{ hooks: [{ type: "command", command: "deferred" }] }],
-					SubagentStart: [{ hooks: [{ type: "command", command: "deferred" }] }],
-					SubagentStop: [{ hooks: [{ type: "command", command: "deferred" }] }],
+					SubagentStart: [{ hooks: [{ type: "command", command: "subagent-start" }] }],
+					SubagentStop: [{ hooks: [{ type: "command", command: "subagent-stop" }] }],
+					SubagentEnd: [{ hooks: [{ type: "command", command: "dead-alias" }] }],
 				},
 			}),
 		);
@@ -343,8 +428,13 @@ describe("Hook configuration discovery", () => {
 			{ event: "SessionStart", command: "user-start", trust: "untrusted" },
 			{ event: "PreToolUse", command: "guard", trust: "untrusted" },
 			{ event: "Stop", command: "stop", trust: "untrusted" },
+			{ event: "SubagentStart", command: "subagent-start", trust: "untrusted" },
+			{ event: "SubagentStop", command: "subagent-stop", trust: "untrusted" },
 		]);
-		expect(discovered.diagnostics.filter(({ code }) => code === "hooks.event-deferred")).toHaveLength(3);
+		expect(discovered.diagnostics.filter(({ code }) => code === "hooks.event-deferred")).toHaveLength(1);
+		expect(discovered.diagnostics).toContainEqual(
+			expect.objectContaining({ code: "hooks.unknown-event", message: expect.stringContaining("SubagentEnd") }),
+		);
 		expect(discovered.diagnostics).toContainEqual(
 			expect.objectContaining({ code: "hooks.additional-context-limit-ignored" }),
 		);

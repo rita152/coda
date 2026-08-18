@@ -1,4 +1,5 @@
 import type { RunResult, ToolExecutionContext } from "@coda/agent";
+import type { LifecycleHookHost, SubagentHookContext } from "../lifecycle-hooks.ts";
 import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
 import type { ObservationBus, RuntimeTime, WorkerControlSink, WorkspacePlacement } from "./ports.ts";
@@ -80,6 +81,7 @@ export interface WorkerRuntimePort {
 		sessionId: string,
 	): Promise<void>;
 	runItem(graph: GraphRecord, item: ItemRecord, host: WorkerProgressionHost): Promise<void>;
+	noteChildTerminal(graph: GraphRecord, item: ItemRecord): Promise<void>;
 }
 
 /** Sole runtime implementation of WorkerRuntimePort. */
@@ -280,7 +282,8 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 		sessionId: string,
 	): Promise<WorkerFactProjection> {
 		const durable = this.#requireDurable();
-		return durable.mutation(graph.id, async () => {
+		let startedChild = false;
+		const projection = await durable.mutation(graph.id, async () => {
 			this.#assertWorkerOwnership(item, runtimeId, sessionId);
 			const transitionFrom =
 				fact.type === "run_started" && item.projection.state === "preparing" ? "preparing" : undefined;
@@ -309,9 +312,17 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 					from: transitionFrom,
 					to: "running",
 				}));
+				startedChild = item.parentId !== undefined;
 			}
 			return aggregateItem.worker;
 		});
+		if (startedChild) await this.#emitSubagentStart(graph, item);
+		return projection;
+	}
+
+	async noteChildTerminal(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		if (!item.parentId) return;
+		await this.#emitSubagentStop(graph, item);
 	}
 
 	publishObservation(
@@ -521,6 +532,58 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 	#assertWorkerOwnership(item: ItemRecord, runtimeId: string, sessionId: string): void {
 		if (item.runtimeId !== runtimeId || item.projection.sessionId !== sessionId) {
 			throw new Error(`Worker ownership changed for Work Item ${item.id}`);
+		}
+	}
+
+	#hooks(): LifecycleHookHost | undefined {
+		return this.#runtimeOptions?.lifecycleHooks;
+	}
+
+	#subagentContext(graph: GraphRecord, item: ItemRecord): SubagentHookContext | undefined {
+		const root = graph.items.get(graph.rootId);
+		const parentSessionId = root?.projection.sessionId;
+		const childSessionId = item.projection.sessionId;
+		if (!parentSessionId || !childSessionId) return undefined;
+		const cwd =
+			item.projection.placementDescriptor?.root ??
+			item.process.placement?.placement.root ??
+			root?.projection.placementDescriptor?.root;
+		if (!cwd) return undefined;
+		return {
+			sessionId: parentSessionId,
+			childSessionId,
+			cwd,
+			model: item.projection.desiredConfiguration.model.id,
+			agentId: String(item.id),
+			agentType: item.executionMode,
+		};
+	}
+
+	async #emitSubagentStart(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		const hooks = this.#hooks();
+		const context = this.#subagentContext(graph, item);
+		if (!hooks || !context) return;
+		try {
+			await hooks.subagentStart(context);
+		} catch (error) {
+			this.#diagnose("subagent_start_hook_failed", errorMessage(error).slice(0, 512), graph, item);
+		}
+	}
+
+	async #emitSubagentStop(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		const hooks = this.#hooks();
+		const context = this.#subagentContext(graph, item);
+		if (!hooks || !context) return;
+		try {
+			await hooks.subagentStop({
+				...context,
+				stopHookActive: false,
+				...(item.projection.result?.run?.assistantText
+					? { lastAssistantMessage: item.projection.result.run.assistantText }
+					: {}),
+			});
+		} catch (error) {
+			this.#diagnose("subagent_stop_hook_failed", errorMessage(error).slice(0, 512), graph, item);
 		}
 	}
 }

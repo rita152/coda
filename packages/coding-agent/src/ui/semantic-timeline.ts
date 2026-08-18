@@ -17,6 +17,14 @@ import {
 	type ToolResultMessage,
 	type UserMessage,
 } from "@coda/ai";
+import type {
+	CodingAgentObservation,
+	CodingAgentSnapshot,
+	WorkExecutionMode,
+	WorkItemSnapshot,
+	WorkItemState,
+	WorkResult,
+} from "@coda/runtime";
 import type { SessionToolLifecycle } from "../session/types.ts";
 import { renderVisibleUserText } from "../skills/context.ts";
 import type { UserShellSnapshot } from "./user-shell.ts";
@@ -63,6 +71,22 @@ export interface TimelineToolInvocation {
 	readonly sourceIndex: number;
 }
 
+export interface TimelineDelegatedWorkResult {
+	readonly state: WorkResult["state"];
+	readonly publication: WorkResult["publication"]["state"];
+	readonly diagnostics: readonly { readonly code: string; readonly message: string }[];
+}
+
+export interface TimelineDelegatedWorkItem {
+	readonly itemId: string;
+	readonly objective: string;
+	readonly executionMode: WorkExecutionMode;
+	readonly state: WorkItemState;
+	readonly currentTool?: { readonly name: string; readonly state: TimelineToolState };
+	readonly result?: TimelineDelegatedWorkResult;
+	readonly tools: readonly TimelineToolEntry[];
+}
+
 export interface TimelineToolEntry {
 	readonly kind: "tool";
 	readonly id: string;
@@ -73,6 +97,7 @@ export interface TimelineToolEntry {
 	readonly endedAt?: number;
 	readonly progress?: Immutable<ToolExecutionProgress>;
 	readonly result?: AgentMessage<ToolResultMessage>;
+	readonly delegated?: readonly TimelineDelegatedWorkItem[];
 }
 
 export interface TimelineUserShellEntry extends UserShellSnapshot {
@@ -109,6 +134,16 @@ interface TextSlot {
 	projected?: TimelineAssistantEntry | TimelineThinkingEntry;
 }
 
+interface DelegatedChildRecord {
+	itemId: string;
+	objective: string;
+	executionMode: WorkExecutionMode;
+	state: WorkItemState;
+	currentTool?: { readonly name: string; readonly state: TimelineToolState };
+	result?: TimelineDelegatedWorkResult;
+	readonly tools: TimelineToolEntry[];
+}
+
 interface ToolSlot {
 	readonly kind: "tool";
 	readonly contentIndex: number;
@@ -121,6 +156,7 @@ interface ToolSlot {
 	endedAt?: number;
 	progress?: Immutable<ToolExecutionProgress>;
 	result?: AgentMessage<ToolResultMessage>;
+	delegated?: Map<string, DelegatedChildRecord>;
 	projected?: TimelineToolEntry;
 }
 
@@ -214,6 +250,32 @@ export class SemanticTimeline {
 		}
 		if (changed) this.#invalidate();
 		return Object.freeze({ changed });
+	}
+
+	acceptObservation(observation: CodingAgentObservation): TimelineMutation {
+		let changed = false;
+		switch (observation.type) {
+			case "item_state_changed":
+				changed = this.#upsertDelegatedChild(observation.itemId, { state: observation.to });
+				break;
+			case "work_item_event":
+				changed = this.#acceptDelegatedWorkerEvent(String(observation.itemId), observation.event);
+				break;
+			case "work_item_settled":
+				changed = this.#settleDelegatedChild(observation.result);
+				break;
+			case "snapshot":
+				changed = this.#replaceDelegatedFromSnapshot(observation.snapshot);
+				break;
+			default:
+				break;
+		}
+		if (changed) this.#invalidateDelegated();
+		return Object.freeze({ changed });
+	}
+
+	resynchronizeObservation(observation: Extract<CodingAgentObservation, { type: "snapshot" }>): TimelineMutation {
+		return this.acceptObservation(observation);
 	}
 
 	acceptUserShell(snapshot: UserShellSnapshot): TimelineMutation {
@@ -428,6 +490,7 @@ export class SemanticTimeline {
 			arguments: clone(call.arguments),
 			state: restored ? "interrupted" : "running",
 		};
+		if (call.name === "delegate") this.#seedDelegatedChildren(slot);
 		group.slots.set(contentIndex, slot);
 		this.#toolByProviderId.set(call.id, slot);
 	}
@@ -438,6 +501,7 @@ export class SemanticTimeline {
 		slot.state = "running";
 		slot.startedAt = timestamp;
 		slot.progress = undefined;
+		if (invocation.toolName === "delegate") this.#seedDelegatedChildren(slot);
 		slot.projected = undefined;
 	}
 
@@ -588,6 +652,9 @@ export class SemanticTimeline {
 						endedAt: slot.endedAt,
 						progress: slot.progress,
 						result: slot.result,
+						...(slot.delegated && slot.delegated.size > 0
+							? { delegated: Object.freeze(this.#projectDelegated(slot.delegated)) }
+							: {}),
 					});
 					entries.push(slot.projected);
 					continue;
@@ -622,6 +689,146 @@ export class SemanticTimeline {
 
 	#invalidateProjectedSlots(group: AssistantGroup): void {
 		for (const slot of group.slots.values()) slot.projected = undefined;
+	}
+
+	#seedDelegatedChildren(slot: ToolSlot): void {
+		const items = delegateChildSpecifications(slot.arguments);
+		if (items.length === 0) return;
+		slot.delegated ??= new Map();
+		for (const item of items) {
+			if (slot.delegated.has(item.itemId)) continue;
+			slot.delegated.set(item.itemId, {
+				itemId: item.itemId,
+				objective: item.objective,
+				executionMode: item.executionMode,
+				state: "pending",
+				tools: [],
+			});
+		}
+	}
+
+	#delegateSlots(): ToolSlot[] {
+		return [...this.#toolByProviderId.values()].filter((slot) => slot.toolName === "delegate");
+	}
+
+	#activeDelegateSlot(): ToolSlot | undefined {
+		const slots = this.#delegateSlots();
+		return slots.find((slot) => slot.state === "running") ?? slots.at(-1);
+	}
+
+	#upsertDelegatedChild(itemId: string, patch: Partial<DelegatedChildRecord>): boolean {
+		const slot = this.#activeDelegateSlot();
+		if (!slot) return false;
+		this.#seedDelegatedChildren(slot);
+		slot.delegated ??= new Map();
+		const existing = slot.delegated.get(itemId);
+		if (!existing && !patch.objective) return false;
+		slot.delegated.set(itemId, {
+			itemId,
+			objective: patch.objective ?? existing?.objective ?? itemId,
+			executionMode: patch.executionMode ?? existing?.executionMode ?? "write",
+			state: patch.state ?? existing?.state ?? "pending",
+			currentTool: patch.currentTool ?? existing?.currentTool,
+			result: patch.result ?? existing?.result,
+			tools: patch.tools ?? existing?.tools ?? [],
+		});
+		return true;
+	}
+
+	#acceptDelegatedWorkerEvent(itemId: string, workerEvent: { readonly type: string }): boolean {
+		if (workerEvent.type !== "tool_execution_start" && workerEvent.type !== "tool_execution_end") return false;
+		const event = workerEvent as Extract<AgentEvent, { type: "tool_execution_start" | "tool_execution_end" }>;
+		const toolState: TimelineToolState =
+			event.type === "tool_execution_start"
+				? "running"
+				: event.outcome === "success"
+					? "success"
+					: event.outcome === "error"
+						? "failed"
+						: "aborted";
+		const toolResult =
+			event.type === "tool_execution_end" && event.result.message.role === "toolResult"
+				? clone(event.result as AgentMessage<ToolResultMessage>)
+				: undefined;
+		const entry: TimelineToolEntry = Object.freeze({
+			kind: "tool",
+			id: `delegated:${itemId}:${event.invocation.id}`,
+			turnId: event.turnId,
+			invocation: freezeInvocation(event.invocation),
+			state: toolState,
+			...(event.type === "tool_execution_start" ? { startedAt: event.timestamp } : {}),
+			...(event.type === "tool_execution_end"
+				? {
+						endedAt: event.timestamp,
+						...(toolResult ? { result: toolResult } : {}),
+					}
+				: {}),
+		});
+		const slot = this.#activeDelegateSlot();
+		const child = slot?.delegated?.get(itemId);
+		const tools = [...(child?.tools ?? [])];
+		const index = tools.findIndex((tool) => tool.invocation.id === event.invocation.id);
+		if (index >= 0) tools[index] = entry;
+		else tools.push(entry);
+		return this.#upsertDelegatedChild(itemId, {
+			currentTool: { name: event.invocation.toolName, state: toolState },
+			tools,
+		});
+	}
+
+	#settleDelegatedChild(result: WorkResult): boolean {
+		return this.#upsertDelegatedChild(String(result.itemId), {
+			state: result.state,
+			result: projectDelegatedResult(result),
+		});
+	}
+
+	#replaceDelegatedFromSnapshot(snapshot: CodingAgentSnapshot): boolean {
+		const slot = this.#activeDelegateSlot();
+		if (!slot) return false;
+		this.#seedDelegatedChildren(slot);
+		const graph = snapshot.graphs.find((candidate) =>
+			candidate.items.some((item) => slot.delegated?.has(String(item.itemId))),
+		);
+		const items = (graph ?? snapshot.graphs[0])?.items ?? [];
+		const children = items.filter((item) => item.parentItemId !== undefined);
+		if (children.length === 0 && !slot.delegated) return false;
+		slot.delegated ??= new Map();
+		for (const item of children) this.#applySnapshotItem(slot, item);
+		return true;
+	}
+
+	#applySnapshotItem(slot: ToolSlot, item: WorkItemSnapshot): void {
+		const itemId = String(item.itemId);
+		const existing = slot.delegated?.get(itemId);
+		slot.delegated?.set(itemId, {
+			itemId,
+			objective: item.objective || existing?.objective || itemId,
+			executionMode: item.executionMode,
+			state: item.state,
+			currentTool: existing?.currentTool,
+			result: item.result ? projectDelegatedResult(item.result) : existing?.result,
+			tools: existing?.tools ?? [],
+		});
+	}
+
+	#projectDelegated(children: Map<string, DelegatedChildRecord>): readonly TimelineDelegatedWorkItem[] {
+		return [...children.values()].map((child) =>
+			Object.freeze({
+				itemId: child.itemId,
+				objective: child.objective,
+				executionMode: child.executionMode,
+				state: child.state,
+				...(child.currentTool ? { currentTool: child.currentTool } : {}),
+				...(child.result ? { result: child.result } : {}),
+				tools: Object.freeze([...child.tools]),
+			}),
+		);
+	}
+
+	#invalidateDelegated(): void {
+		for (const slot of this.#delegateSlots()) slot.projected = undefined;
+		this.#invalidate();
 	}
 }
 
@@ -689,4 +896,37 @@ function observationToolState(message: Parameters<typeof resolveToolObservation>
 
 function clone<T>(value: T): T {
 	return structuredClone(value);
+}
+
+function projectDelegatedResult(result: WorkResult): TimelineDelegatedWorkResult {
+	return Object.freeze({
+		state: result.state,
+		publication: result.publication.state,
+		diagnostics: Object.freeze(
+			result.diagnostics.map((diagnostic) =>
+				Object.freeze({ code: diagnostic.code, message: diagnostic.message }),
+			),
+		),
+	});
+}
+
+function delegateChildSpecifications(arguments_: Immutable<Record<string, unknown>>): readonly {
+	readonly itemId: string;
+	readonly objective: string;
+	readonly executionMode: WorkExecutionMode;
+}[] {
+	const items = arguments_.items;
+	if (!Array.isArray(items)) return [];
+	return items.flatMap((item) => {
+		if (typeof item !== "object" || item === null) return [];
+		const record = item as Record<string, unknown>;
+		if (typeof record.itemId !== "string" || typeof record.objective !== "string") return [];
+		return [
+			{
+				itemId: record.itemId,
+				objective: record.objective,
+				executionMode: record.executionMode === "read_only" ? "read_only" : "write",
+			},
+		];
+	});
 }

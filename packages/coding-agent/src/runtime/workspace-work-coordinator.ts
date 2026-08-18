@@ -251,6 +251,22 @@ export function createWorkspaceWorkCoordinator(options: {
 	const drivers = new Map<string, SessionWorkSelection>();
 	const elicitationBySession = new Map<string, (request: McpAgentElicitation) => Promise<McpElicitationResult>>();
 	const sessionByRun = new Map<string, string>();
+	const parentSessionByChild = new Map<string, string>();
+
+	const controllerForGraph = (graphId: string): SessionWorkController | undefined => {
+		for (const controller of controllers.values()) {
+			if (controller.state().activeGraphId === graphId) return controller;
+		}
+		return undefined;
+	};
+
+	const elicitationHandlerFor = (sessionId: string | undefined) => {
+		if (!sessionId) return undefined;
+		return (
+			elicitationBySession.get(sessionId) ??
+			elicitationBySession.get(parentSessionByChild.get(sessionId) ?? "")
+		);
+	};
 	const placementWorkspaces = new Map<string, Promise<Workspace>>([
 		[options.workspace.root, Promise.resolve(options.workspace)],
 	]);
@@ -384,7 +400,7 @@ export function createWorkspaceWorkCoordinator(options: {
 			selectedToolIds: () => options.mcpRegistry?.selectedToolIds() ?? new Set(),
 			elicit: async (request) => {
 				const owner = sessionByRun.get(String(request.execution.runId));
-				return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };
+				return elicitationHandlerFor(owner)?.(request) ?? { action: "decline" };
 			},
 		}),
 	];
@@ -405,21 +421,49 @@ export function createWorkspaceWorkCoordinator(options: {
 						for (const controller of controllers.values()) controller.resynchronize(observation.snapshot);
 						continue;
 					}
-					if (observation.type !== "work_item_event") continue;
-					const event = observation.event;
-					if (event.type === "preparation_settled" && event.outcome === "prepared") {
-						controllers.get(observation.sessionId)?.notePreparation({
-							version: event.promptVersion,
-							sha256: event.promptSha256,
-						});
-						continue;
+					const graphId =
+						observation.type === "work_graph_settled"
+							? observation.result.graphId
+							: "graphId" in observation
+								? observation.graphId
+								: undefined;
+					const owner = graphId ? controllerForGraph(graphId) : undefined;
+					if (
+						owner &&
+						"sessionId" in observation &&
+						typeof observation.sessionId === "string" &&
+						observation.sessionId !== owner.sessionId
+					) {
+						parentSessionByChild.set(observation.sessionId, owner.sessionId);
 					}
-					if (!("runId" in event)) continue;
-					controllers.get(observation.sessionId)?.acceptWorkerEvent(event, {
-						graphId: observation.graphId,
-						itemId: observation.itemId,
-						runtimeId: observation.runtimeId,
-					});
+					if (observation.type === "work_item_event") {
+						const event = observation.event;
+						if (event.type === "preparation_settled" && event.outcome === "prepared") {
+							if (!owner || observation.itemId === owner.state().activeItemId) {
+								(owner ?? controllers.get(observation.sessionId))?.notePreparation({
+									version: event.promptVersion,
+									sha256: event.promptSha256,
+								});
+							}
+						} else if ("runId" in event && owner && observation.itemId === owner.state().activeItemId) {
+							owner.acceptWorkerEvent(event, {
+								graphId: observation.graphId,
+								itemId: observation.itemId,
+								runtimeId: observation.runtimeId,
+							});
+						} else if ("runId" in event && !owner) {
+							controllers.get(observation.sessionId)?.acceptWorkerEvent(event, {
+								graphId: observation.graphId,
+								itemId: observation.itemId,
+								runtimeId: observation.runtimeId,
+							});
+						}
+					}
+					try {
+						owner?.acceptObservation(observation);
+					} catch {
+						// Observation projection must not become a Work Graph barrier.
+					}
 				}
 			}
 		})().catch(() => undefined);

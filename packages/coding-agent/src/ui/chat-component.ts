@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentSeed } from "@coda/agent";
+import type { CodingAgentObservation, CodingAgentSnapshot } from "@coda/runtime";
 import {
 	type Clock,
 	type ColorLevel,
@@ -317,12 +318,27 @@ export class ChatComponent extends Component {
 		this.#state.mutate({ type: "accept_run_evidence", evidence });
 	}
 
-	resynchronize(seed: AgentSeed, toolInvocations: readonly SessionToolLifecycle[], running: boolean): void {
-		this.#state.mutate({ type: "resynchronize", seed, toolInvocations, running });
+	resynchronize(
+		seed: AgentSeed,
+		toolInvocations: readonly SessionToolLifecycle[],
+		running: boolean,
+		snapshot?: CodingAgentSnapshot,
+	): void {
+		this.#state.mutate({
+			type: "resynchronize",
+			seed,
+			toolInvocations,
+			running,
+			...(snapshot ? { snapshot } : {}),
+		});
 	}
 
 	accept(event: AgentEvent): void {
 		this.#state.project({ type: "agent_event", event });
+	}
+
+	acceptObservation(observation: CodingAgentObservation): void {
+		this.#state.project({ type: "observation", observation });
 	}
 
 	acceptUserShell(snapshot: UserShellSnapshot): void {

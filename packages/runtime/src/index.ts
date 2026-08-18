@@ -7,6 +7,7 @@ export type {
 	PostToolUseHookOutcome,
 	PreToolUseHookOutcome,
 	StopHookOutcome,
+	SubagentHookContext,
 	UserPromptSubmitHookOutcome,
 } from "./lifecycle-hooks.ts";
 export type {

@@ -8,13 +8,14 @@ import type { ConfiguredCommandHook, HookConfigurationSnapshot, HookDiagnostic, 
 import { SUPPORTED_HOOK_EVENTS } from "./types.ts";
 
 const EVENT_NAMES = new Set<string>(SUPPORTED_HOOK_EVENTS);
-const DEFERRED_EVENTS = new Set(["PermissionRequest", "SubagentStart", "SubagentStop", "SubagentEnd"]);
+const DEFERRED_EVENTS = new Set(["PermissionRequest"]);
 const EVENTS_WITHOUT_MATCHERS = new Set<LifecycleHookEventName>(["UserPromptSubmit", "Stop"]);
 const EVENTS_WITH_ADDITIONAL_CONTEXT = new Set<LifecycleHookEventName>([
 	"PreToolUse",
 	"PostToolUse",
 	"SessionStart",
 	"UserPromptSubmit",
+	"SubagentStart",
 ]);
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_CONTEXT_LIMIT = 2_500;

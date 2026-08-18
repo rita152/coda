@@ -9,6 +9,8 @@ export const LIFECYCLE_HOOK_EVENTS = Object.freeze([
 	"SessionEnd",
 	"UserPromptSubmit",
 	"Stop",
+	"SubagentStart",
+	"SubagentStop",
 ] as const);
 
 export type LifecycleHookEventName = (typeof LIFECYCLE_HOOK_EVENTS)[number];
@@ -50,6 +52,13 @@ export interface StopHookOutcome extends HookContinueOutcome {
 	readonly continuation?: string;
 }
 
+export interface SubagentHookContext extends LifecycleHookSessionContext {
+	readonly agentId: string;
+	readonly agentType: "read_only" | "write";
+	readonly childSessionId: string;
+	readonly agentTranscriptPath?: string;
+}
+
 /**
  * Runtime-facing lifecycle seam. The runtime owns event timing while the
  * application adapter owns configuration discovery and physical processes.
@@ -83,6 +92,13 @@ export interface LifecycleHookHost {
 	postCompact(context: LifecycleHookTurnContext & { readonly trigger: "auto" }): Promise<HookContinueOutcome>;
 	stop(
 		context: LifecycleHookTurnContext & {
+			readonly stopHookActive: boolean;
+			readonly lastAssistantMessage?: string;
+		},
+	): Promise<StopHookOutcome>;
+	subagentStart(context: SubagentHookContext): Promise<UserPromptSubmitHookOutcome>;
+	subagentStop(
+		context: SubagentHookContext & {
 			readonly stopHookActive: boolean;
 			readonly lastAssistantMessage?: string;
 		},

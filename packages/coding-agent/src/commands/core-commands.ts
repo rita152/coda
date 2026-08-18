@@ -60,6 +60,13 @@ export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:cancel-work",
+		name: "cancel-work",
+		title: "Cancel Work",
+		description: "Cancel one child Work Item or the entire Work Graph",
+		kind: "control",
+	}),
+	coreCommand({
 		id: "core:new",
 		name: "new",
 		title: "New session",

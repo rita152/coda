@@ -29,6 +29,8 @@ function inner(pre: Awaited<ReturnType<LifecycleHookHost["preToolUse"]>>): Lifec
 		preCompact: async () => ({ continue: true }),
 		postCompact: async () => ({ continue: true }),
 		stop: async () => ({ continue: true }),
+		subagentStart: async () => ({ continue: true }),
+		subagentStop: async () => ({ continue: true }),
 		takeAdditionalContext: () => [],
 		close: async () => undefined,
 	};
@@ -237,5 +239,67 @@ describe("Command Permission application integration", () => {
 		});
 		expect(exitCode, stderr.value).toBe(1);
 		expect(stderr.value).toContain("completion partial");
+	});
+});
+
+describe("InteractiveCommandPermissionHandler", () => {
+	it("queues a second child ask instead of denying it", async () => {
+		const { Component, createSystemScheduler, Tui, VirtualTerminal } = await import("@coda/tui");
+		const { InteractiveCommandPermissionHandler } = await import("../src/ui/command-permission.ts");
+		class Root extends Component {
+			render(): string[] {
+				return ["chat"];
+			}
+		}
+		const terminal = new VirtualTerminal({ columns: 80, rows: 24 });
+		const tui = new Tui({
+			terminal,
+			root: new Root(),
+			clock: { now: () => 1_000 },
+			scheduler: createSystemScheduler(),
+			keybindings: [],
+		});
+		const handler = new InteractiveCommandPermissionHandler();
+		handler.bind(tui, terminal);
+		await tui.start();
+		const first = handler.request({
+			toolName: "bash",
+			toolInput: { command: "npm test" },
+			sessionId: "session:child-a",
+			workspace: "/workspace",
+			prompt: "Allow child A?",
+		});
+		const second = handler.request({
+			toolName: "bash",
+			toolInput: { command: "npm lint" },
+			sessionId: "session:child-b",
+			workspace: "/workspace",
+			prompt: "Allow child B?",
+		});
+		await terminal.emit({
+			type: "key",
+			key: "enter",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await expect(first).resolves.toEqual({ action: "allow" });
+		await terminal.emit({
+			type: "key",
+			key: "escape",
+			shift: false,
+			control: false,
+			alt: false,
+			meta: false,
+			action: "press",
+		});
+		await expect(second).resolves.toEqual({
+			action: "deny",
+			reason: "User denied this Tool Invocation",
+		});
+		handler.unbind();
+		await tui.stop();
 	});
 });

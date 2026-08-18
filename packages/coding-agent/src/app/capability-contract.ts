@@ -90,6 +90,9 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/session-work-controller.test.ts",
 			"packages/coding-agent/test/workspace-input-resources.test.ts",
 			"packages/coding-agent/test/workspace-work-sessions.test.ts",
+			"packages/coding-agent/test/delegated-work-observation.test.ts",
+			"packages/coding-agent/test/delegated-work-approval.test.ts",
+			"packages/runtime/test/subagent-lifecycle-hooks.test.ts",
 		],
 	}),
 	capability({
@@ -208,9 +211,10 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Lifecycle Hooks",
 		summary:
-			"Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, and Stop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation.",
+			"Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, Stop, and SubagentStart/SubagentStop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation. SubagentStart fires when a child Work Item enters running; SubagentStop fires at that child's terminal state.",
 		sources: [
 			"packages/runtime/src/lifecycle-hooks.ts",
+			"packages/runtime/src/work-graph/worker-lifecycle.ts",
 			"packages/runtime/src/work-graph/worker-runtime.ts",
 			"packages/coding-agent/src/hooks/config.ts",
 			"packages/coding-agent/src/hooks/manager.ts",
@@ -219,6 +223,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/hooks.test.ts",
 			"packages/coding-agent/test/hooks-application.test.ts",
 			"packages/runtime/test/context-window.test.ts",
+			"packages/runtime/test/subagent-lifecycle-hooks.test.ts",
 		],
 	}),
 	capability({
@@ -427,10 +432,11 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Terminal experience",
 		summary:
-			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill and MCP mentions, and Workspace-scoped `@` file mention completion, plus background Session activity.",
+			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill and MCP mentions, and Workspace-scoped `@` file mention completion, plus background Session activity. Parent Timeline and Activity project child Work Items under `delegate`.",
 		sources: [
 			"packages/tui/src/tui.ts",
 			"packages/coding-agent/src/ui/run-interactive.ts",
+			"packages/coding-agent/src/ui/semantic-timeline.ts",
 			"packages/coding-agent/src/ui/file-mention-composer.ts",
 			"packages/coding-agent/src/host/workspace-file-search.ts",
 		],
@@ -439,6 +445,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/test/interactive-mode.test.ts",
 			"packages/coding-agent/test/file-mention-composer.test.ts",
 			"packages/coding-agent/test/workspace-file-search.test.ts",
+			"packages/coding-agent/test/delegated-work-timeline.test.ts",
 		],
 	}),
 	capability({
@@ -528,12 +535,12 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		tests: ["packages/coding-agent/test/public-contract.test.ts"],
 	}),
 	capability({
-		id: "coding-agent.deferred-lifecycle-hooks",
+		id: "coding-agent.deferred-permission-request-hook",
 		package: "@coda/coding-agent",
 		status: "deferred",
-		title: "Permission and delegated-worker Hooks",
+		title: "PermissionRequest Hook",
 		summary:
-			"PermissionRequest remains a deferred hook event. Command Permission now resolves ask on PreToolUse. SubagentStart and SubagentStop stay inert until delegated-worker lifecycle exists.",
+			"PermissionRequest remains a deferred hook event. Command Permission resolves ask on PreToolUse.",
 		sources: ["packages/runtime/src/lifecycle-hooks.ts", "packages/coding-agent/src/hooks/config.ts"],
 		tests: ["packages/coding-agent/test/hooks.test.ts"],
 	}),

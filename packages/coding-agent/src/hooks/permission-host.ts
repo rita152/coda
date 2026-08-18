@@ -14,6 +14,7 @@ import type {
 	PostToolUseHookOutcome,
 	PreToolUseHookOutcome,
 	StopHookOutcome,
+	SubagentHookContext,
 	UserPromptSubmitHookOutcome,
 } from "@coda/runtime";
 
@@ -144,6 +145,19 @@ export class PermissionLifecycleHookHost implements LifecycleHookHost {
 
 	stop(context: Parameters<LifecycleHookHost["stop"]>[0]): Promise<StopHookOutcome> {
 		return this.#inner.stop(context);
+	}
+
+	subagentStart(context: SubagentHookContext): Promise<UserPromptSubmitHookOutcome> {
+		return this.#inner.subagentStart(context);
+	}
+
+	subagentStop(
+		context: SubagentHookContext & {
+			readonly stopHookActive: boolean;
+			readonly lastAssistantMessage?: string;
+		},
+	): Promise<StopHookOutcome> {
+		return this.#inner.subagentStop(context);
 	}
 
 	takeAdditionalContext(sessionId: string): readonly string[] {

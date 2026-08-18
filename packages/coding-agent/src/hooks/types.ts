@@ -9,6 +9,8 @@ export const SUPPORTED_HOOK_EVENTS = Object.freeze([
 	"SessionEnd",
 	"UserPromptSubmit",
 	"Stop",
+	"SubagentStart",
+	"SubagentStop",
 ] as const satisfies readonly LifecycleHookEventName[]);
 
 export type HookConfigurationSource = "user" | "workspace";

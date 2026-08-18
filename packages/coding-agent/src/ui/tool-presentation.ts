@@ -63,6 +63,7 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 		options.transcript ? "  │ " : options.theme.style("muted", "  │ "),
 	);
 	const detailWidth = Math.max(1, options.width - 4);
+	const delegated = renderDelegatedChildren(entry, detailWidth, options);
 	let details = renderDetails(entry, detailWidth, options);
 	if (!options.transcript) {
 		if (details.length === 0 && entry.invocation.toolName === "bash" && entry.result && entry.state !== "running") {
@@ -73,16 +74,43 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 			details = details.map((line) => options.theme.style("muted", line));
 		}
 	}
-	if (details.length === 0) return titleLines;
+	const body = [...delegated, ...details];
+	if (body.length === 0) return titleLines;
 	return [
 		...titleLines,
-		...details.map((line, index) =>
+		...body.map((line, index) =>
 			clipAnsi(
 				`${index === 0 && !options.transcript ? options.theme.style("muted", "  └ ") : index === 0 ? "  └ " : "    "}${line}`,
 				options.width,
 			),
 		),
 	];
+}
+
+function renderDelegatedChildren(
+	entry: TimelineToolEntry,
+	width: number,
+	options: ToolRenderOptions,
+): string[] {
+	if (!entry.delegated || entry.delegated.length === 0) return [];
+	const lines: string[] = [];
+	for (const child of entry.delegated) {
+		const tool = child.currentTool ? ` · ${child.currentTool.name}` : "";
+		const result =
+			child.result === undefined
+				? ""
+				: ` · ${child.result.state} · ${child.result.publication}${
+						child.result.diagnostics[0] ? ` · ${child.result.diagnostics[0].code}` : ""
+					}`;
+		lines.push(...wrapAnsi(`${child.executionMode} · ${child.objective} · ${child.state}${tool}${result}`, width));
+		if (options.transcript) {
+			for (const toolEntry of child.tools) {
+				const nested = renderToolInvocation(toolEntry, { ...options, width: Math.max(1, width - 2) });
+				lines.push(...nested.map((line) => `  ${line}`));
+			}
+		}
+	}
+	return options.transcript ? lines : lines.map((line) => options.theme.style("muted", line));
 }
 
 function styledStatusTitle(entry: TimelineToolEntry, theme: TuiTheme): string {
@@ -142,6 +170,8 @@ function actionParts(invocation: ToolActionInvocation, completed: boolean): Tool
 			};
 		case "process":
 			return processActionParts(arguments_, completed);
+		case "delegate":
+			return { verb: completed ? "Delegated" : "Delegating", subject: "child Work Items" };
 		default: {
 			const name = sanitizeInline(toolName);
 			const argumentsSummary = compactArguments(arguments_);

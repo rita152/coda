@@ -639,6 +639,7 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	async #afterItemTerminal(graph: GraphRecord, item: ItemRecord): Promise<void> {
+		await this.#workerLifecycle.noteChildTerminal(graph, item);
 		this.#delegation.noteItemTerminal();
 		for (const parent of graph.itemOrder.filter((candidate) => candidate.id === item.parentId)) {
 			await this.#lifecycle.trySettleItem(graph, parent);
