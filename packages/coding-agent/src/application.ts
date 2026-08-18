@@ -50,15 +50,10 @@ import {
 	resolveWorkspaceContext,
 } from "./app/workspace-session.ts";
 import type { CommandRegistry } from "./commands/registry.ts";
-import type { CompletionWorkspaceEvidenceProvider } from "./completion/index.ts";
-import {
-	CommandLifecycleHookHost,
-	type CommandPermissionAsk,
-	hookReviewText,
-	inspectHookConfiguration,
-	PermissionLifecycleHookHost,
-	trustAllHooks,
-} from "./hooks/index.ts";
+import type { CompletionWorkspaceEvidenceProvider } from "./completion/types.ts";
+import { hookReviewText, inspectHookConfiguration, trustAllHooks } from "./hooks/config.ts";
+import { CommandLifecycleHookHost } from "./hooks/manager.ts";
+import { type CommandPermissionAsk, PermissionLifecycleHookHost } from "./hooks/permission-host.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
 import type { FileSystem } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";

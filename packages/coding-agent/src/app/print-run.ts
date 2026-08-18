@@ -1,9 +1,7 @@
 import type { AgentInput, Clock } from "@coda/agent";
-import {
-	CodingCompletionController,
-	type CompletionWorkspaceEvidenceProvider,
-	createGitWorkspaceEvidenceProvider,
-} from "../completion/index.ts";
+import { CodingCompletionController } from "../completion/completion-controller.ts";
+import type { CompletionWorkspaceEvidenceProvider } from "../completion/types.ts";
+import { createGitWorkspaceEvidenceProvider } from "../completion/workspace-evidence.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
