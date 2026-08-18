@@ -5,7 +5,8 @@ Status: implemented
 Subsequent Runtime, Skill, and MCP work replaced parts of the ownership and
 deferred-capability text below. Current behavior is documented in
 [`packages/coding-agent/README.md`](../../packages/coding-agent/README.md) and
-the generated capability manifest.
+the generated capability manifest. The design below is retained as
+implementation history.
 
 ## Objective
 

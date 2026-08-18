@@ -172,6 +172,21 @@ export class MemoryWorkspacePersistence implements WorkspacePersistence {
 				assertLedgerOpen();
 				return clone(this.#state);
 			},
+			reserveOrders: async (request: { readonly graphCount: number; readonly publicationCount: number }) => {
+				assertLedgerOpen();
+				for (const [name, value] of Object.entries(request)) {
+					if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+				}
+				const graphOrderStart = this.#state.nextGraphOrder;
+				const publicationOrderStart = this.#state.nextPublicationOrder;
+				const nextGraphOrder = graphOrderStart + request.graphCount;
+				const nextPublicationOrder = publicationOrderStart + request.publicationCount;
+				if (!Number.isSafeInteger(nextGraphOrder) || !Number.isSafeInteger(nextPublicationOrder)) {
+					throw new Error("Workspace order reservation exceeds the safe integer range");
+				}
+				this.#state = validatedLedger({ ...this.#state, nextGraphOrder, nextPublicationOrder });
+				return { graphOrderStart, publicationOrderStart, nextGraphOrder, nextPublicationOrder };
+			},
 			accept: async (acceptance: WorkspaceLedgerAcceptance) => {
 				assertLedgerOpen();
 				const active = new Map(this.#state.activeGraphs.map((entry) => [entry.graphId, entry]));

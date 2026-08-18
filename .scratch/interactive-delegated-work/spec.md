@@ -161,7 +161,8 @@ lifecycle Fact is durable; it is not an Observation barrier.
 
 Write a new ADR that replaces ADR-0053's sentence "SubagentStart and
 SubagentStop remain outside until delegated-worker lifecycle exists." Do not
-rewrite ADR-0053's body.
+rewrite ADR-0053's body. Landed as
+[`ADR-0059`](../../docs/adr/0059-runtime-subagent-lifecycle-hooks.md).
 
 ## Seams under test
 
@@ -200,7 +201,7 @@ In an interactive Session, when the model delegates two write children:
 
 ## Durable outcome
 
-- New ADR for Subagent hook timing (next number after 0058).
+- [`ADR-0059`](../../docs/adr/0059-runtime-subagent-lifecycle-hooks.md) for Subagent hook timing.
 - Capability: Subagent hooks become `runtime-supported` on
   `coding-agent.lifecycle-hooks`. `PermissionRequest` stays a separate deferred
   capability.

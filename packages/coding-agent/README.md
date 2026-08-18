@@ -1,10 +1,11 @@
 # `@coda/coding-agent`
 
 Coda's private terminal Coding Agent application. It composes `@coda/ai`,
-`@coda/agent`, `@coda/runtime`, `@coda/tui`, `@coda/skills`, and `@coda/mcp`.
-The package owns CLI and terminal policy, host Adapters, durable Session storage,
-Model configuration, Credentials, and application presentation; the headless
-Work Graph and Worker Runtime policies live in `@coda/runtime`.
+`@coda/agent`, `@coda/runtime`, `@coda/tui`, `@coda/skills`, `@coda/mcp`,
+`@coda/permission`, and `@coda/sandbox`. The package owns CLI and terminal
+policy, host Adapters, durable Session storage, Model configuration,
+Credentials, and application presentation; the headless Work Graph and Worker
+Runtime policies live in `@coda/runtime`.
 
 This package is a CLI application, not an application SDK. Its npm export map is
 intentionally empty; composition seams under `src/` are private and may change
@@ -141,8 +142,12 @@ translated for OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
 `/permissions` opens Codex's Update Model Permissions presets — Read Only, Ask
 for approval, and Full Access — and applies the selected Approval Policy and
 Process Confinement Mode to the current Session. Full Access asks for
-confirmation first. `/follow-up` is available only for a running Session, while
-unknown Slash text is submitted as ordinary Prompt text.
+confirmation first. `/cancel-work` cancels one child Work Item or the entire
+Work Graph through Worker Control and does not claim to roll back Tool or
+Publication side effects that already happened. Child Command Permission asks
+and MCP Elicitations answer on the focused parent Session. `/follow-up` is
+available only for a running Session, while unknown Slash text is submitted as
+ordinary Prompt text.
 
 Useful maintenance commands are `coda sessions` and `coda cleanup`. Run
 `coda skills validate <path>` for strict Agent Skills validation without a Model
@@ -175,13 +180,16 @@ The implemented events are `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `SubagentStart`, and `SubagentStop`.
 Command Permission hangs on `PreToolUse` and can resolve a hook
 `permissionDecision:ask` before the runtime sees the outcome. Approval Policy
-is `untrusted`, `on-request`, or `never` (`--ask-for-approval`). `/permissions`
-changes that policy together with Process Confinement Mode for the current
-Session. Print mode defaults Approval Policy to `never` and denies unresolved
-asks, matching Codex exec. `--strict-permissions` keeps that deny path when
-`--ask-for-approval` is set in print mode.
-`SubagentStart` runs when a child Work Item enters `running`; `SubagentStop`
-runs when that child reaches a terminal state. Matcher input is the child's
+is `untrusted`, `on-request`, or `never` (`--ask-for-approval`). Interactive
+mode defaults to `on-request` when no CLI or settings override is present.
+`/permissions` changes that policy together with Process Confinement Mode for
+the current Session. Print mode defaults Approval Policy to `never` and denies
+unresolved asks, matching Codex exec. `--strict-permissions` keeps that deny
+path when `--ask-for-approval` is set in print mode.
+`SubagentStart` runs after a child's `run_started` Fact makes `running`
+durable; `SubagentStop` runs when that child reaches a terminal Work Result.
+Timing belongs to `@coda/runtime` Worker lifecycle; discovery, exact-handler
+trust, and process execution stay here. Matcher input is the child's
 `executionMode`. `PermissionRequest` remains a recognized configuration event
 but is not executed.
 
@@ -372,6 +380,6 @@ This status block is generated from executable runtime contracts. See the
 - **Additional terminal input and image protocols** (@coda/tui) — General mouse UI, Sixel, iTerm2 graphics, multiplexer image passthrough, and a generic terminal-image protocol are not implemented.
 <!-- coda:capabilities:end -->
 
-Model File Tools accept Workspace-relative or explicit absolute paths. Model `bash`, `process`, native search helpers, and file mutation workers execute as the current user; Shell and background processes inherit Coda's complete process environment. `--sandbox read-only|workspace-write|danger-full-access` or `settings.sandbox.mode` confines Bash, User Shell, and Process Session scripts through Process Confinement; File Tools, hook handlers, and credential helpers stay on the host. Bare `--sandbox` selects workspace-write. Danger-full-access leaves those scripts on the host. Long-running processes use the `process` Tool with opaque process-local identities; they cannot be restored as live after restart.
+Model File Tools accept Workspace-relative or explicit absolute paths. Model `bash`, `process`, native search helpers, and file mutation workers execute as the current user; Shell and background processes inherit Coda's complete process environment. `--sandbox read-only|workspace-write|danger-full-access` or `settings.sandbox.mode` confines Bash, User Shell, and Process Session scripts through Process Confinement; File Tools, hook handlers, and credential helpers stay on the host. Unset Process Confinement Mode defaults to `danger-full-access` and leaves those scripts on the host. Bare `--sandbox` selects workspace-write. Long-running processes use the `process` Tool with opaque process-local identities; they cannot be restored as live after restart.
 
-Explicit interactive `!command` remains a separate direct-user entry point. It inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation. When Process Confinement is enabled, User Shell scripts use the same `wrapScript` seam.
+Explicit interactive `!command` remains a separate direct-user entry point. It inherits the full environment, stays outside model Context and Session data, and uses bounded terminal-sanitized output, timeout, and process-group cancellation. When Process Confinement Mode is `read-only` or `workspace-write`, User Shell scripts use the same `wrapScript` seam; `danger-full-access` leaves them on the host.

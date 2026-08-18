@@ -157,35 +157,83 @@ workspacePersistenceContract("memory", async () => ({ persistence: new MemoryWor
 workspacePersistenceContract("Node filesystem", () => fileFixture("coda-workspace-persistence-contract-"));
 
 describe("Node filesystem Workspace persistence", () => {
-	it("rejects a second process lease before it can open Work Graph storage", async () => {
-		const { root } = await fileFixture("coda-workspace-persistence-lock-");
-		const firstProcess = createFileWorkspacePersistence(createNodeFileSystem(), root);
-		const secondProcess = createFileWorkspacePersistence(createNodeFileSystem(), root);
-		const firstLease = await firstProcess.acquire();
-		await expect(secondProcess.acquire()).rejects.toThrow("Workspace process lease is already held");
-		expect(await readFile(join(root, "workspace.lease"), "utf8")).toContain(firstLease.epoch);
-		await firstLease.close();
-		const secondLease = await secondProcess.acquire();
-		await secondLease.close();
-	});
-
-	it("archives a dead process lease before opening the next epoch", async () => {
+	it("ignores a legacy Workspace process lease", async () => {
 		const { root } = await fileFixture("coda-workspace-persistence-stale-lock-");
-		const staleEpoch = "00000000-0000-4000-8000-000000000000";
+		const legacyEpoch = "00000000-0000-4000-8000-000000000000";
 		await writeFile(
 			join(root, "workspace.lease"),
 			`${JSON.stringify({
 				version: 1,
-				epoch: staleEpoch,
-				pid: 2_147_483_647,
+				epoch: legacyEpoch,
+				pid: process.pid,
 				acquiredAt: "2000-01-01T00:00:00.000Z",
 			})}\n`,
 		);
 		const persistence = createFileWorkspacePersistence(createNodeFileSystem(), root);
 		const lease = await persistence.acquire();
-		expect(lease.epoch).not.toBe(staleEpoch);
-		expect((await readdir(root)).some((name) => name.startsWith(`workspace.lease.stale-${staleEpoch}-`))).toBe(true);
+		expect(lease.epoch).not.toBe(legacyEpoch);
+		expect(await readFile(join(root, "workspace.lease"), "utf8")).toContain(legacyEpoch);
 		await lease.close();
+	});
+
+	it("merges concurrent epochs while keeping their live Graphs isolated", async () => {
+		const { root } = await fileFixture("coda-workspace-persistence-concurrent-");
+		const firstProcess = createFileWorkspacePersistence(createNodeFileSystem(), root);
+		const secondProcess = createFileWorkspacePersistence(createNodeFileSystem(), root);
+		const [firstLease, secondLease] = await Promise.all([firstProcess.acquire(), secondProcess.acquire()]);
+		expect(firstLease.epoch).not.toBe(secondLease.epoch);
+		await expect(firstLease.ledger.load()).resolves.toMatchObject({ activeGraphs: [] });
+		await expect(secondLease.ledger.load()).resolves.toMatchObject({ activeGraphs: [] });
+		const [firstOrders, secondOrders] = await Promise.all([
+			firstLease.ledger.reserveOrders({ graphCount: 1, publicationCount: 2 }),
+			secondLease.ledger.reserveOrders({ graphCount: 1, publicationCount: 2 }),
+		]);
+		expect([firstOrders.graphOrderStart, secondOrders.graphOrderStart].sort((left, right) => left - right)).toEqual([
+			0, 1,
+		]);
+		expect(
+			[firstOrders.publicationOrderStart, secondOrders.publicationOrderStart].sort((left, right) => left - right),
+		).toEqual([0, 2]);
+		const graphA = graphId("graph:concurrent-a");
+		const graphB = graphId("graph:concurrent-b");
+		await Promise.all([
+			firstLease.ledger.accept({
+				activeGraphs: [{ graphId: graphA, order: firstOrders.graphOrderStart }],
+				nextGraphOrder: firstOrders.nextGraphOrder,
+				nextPublicationOrder: firstOrders.nextPublicationOrder,
+				sessionOwners: [],
+			}),
+			secondLease.ledger.accept({
+				activeGraphs: [{ graphId: graphB, order: secondOrders.graphOrderStart }],
+				nextGraphOrder: secondOrders.nextGraphOrder,
+				nextPublicationOrder: secondOrders.nextPublicationOrder,
+				sessionOwners: [],
+			}),
+		]);
+		await expect(firstLease.ledger.load()).resolves.toMatchObject({ activeGraphs: [{ graphId: graphA }] });
+		await expect(secondLease.ledger.load()).resolves.toMatchObject({ activeGraphs: [{ graphId: graphB }] });
+
+		await Promise.all([firstLease.close(), secondLease.close()]);
+		expect(await readdir(join(root, "epochs"))).toEqual([]);
+		const persisted = JSON.parse(await readFile(join(root, "ledger.json"), "utf8")) as {
+			activeGraphs: readonly { readonly graphId: string; readonly ownerEpoch?: string }[];
+		};
+		expect(persisted.activeGraphs.map(({ graphId }) => graphId).sort()).toEqual([graphA, graphB].sort());
+		const recovered = await createFileWorkspacePersistence(createNodeFileSystem(), root).acquire();
+		const reclaimed = JSON.parse(await readFile(join(root, "ledger.json"), "utf8")) as {
+			activeGraphs: readonly { readonly ownerEpoch?: string }[];
+		};
+		expect(reclaimed.activeGraphs.map(({ ownerEpoch }) => ownerEpoch)).toEqual([recovered.epoch, recovered.epoch]);
+		const expectedGraphs = [
+			{ graphId: graphA, order: firstOrders.graphOrderStart },
+			{ graphId: graphB, order: secondOrders.graphOrderStart },
+		].sort((left, right) => left.order - right.order);
+		await expect(recovered.ledger.load()).resolves.toMatchObject({
+			activeGraphs: expectedGraphs,
+			nextGraphOrder: 2,
+			nextPublicationOrder: 4,
+		});
+		await recovered.close();
 	});
 
 	it("does not share append or flush tails between Graph files", async () => {

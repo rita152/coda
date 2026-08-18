@@ -21,7 +21,7 @@ import {
 	type WorkspaceExecution,
 } from "../src/index.ts";
 import { MemoryWorkspacePersistence } from "../src/work-graph/memory-workspace-persistence.ts";
-import { decodeWorkGraphRestore } from "../src/work-graph/persistence-codec.ts";
+import { decodeWorkGraphRestore, emptyWorkspaceLedger } from "../src/work-graph/persistence-codec.ts";
 import type {
 	WorkerControlSink,
 	WorkGraphStore,
@@ -354,6 +354,7 @@ class PoisonedLedgerPersistence implements WorkspacePersistence {
 			...lease,
 			ledger: Object.freeze({
 				load: () => ledger.load(),
+				reserveOrders: (request: Parameters<typeof ledger.reserveOrders>[0]) => ledger.reserveOrders(request),
 				accept: async (acceptance: Parameters<typeof ledger.accept>[0]) => {
 					attempt("accept");
 					await ledger.accept(acceptance);
@@ -3234,6 +3235,26 @@ describe("Work Graph public Interface", () => {
 		await lease.close();
 	});
 
+	it("uses Workspace orders atomically reserved by persistent storage", async () => {
+		const memory = new MemoryWorkspacePersistence({
+			ledger: { ...emptyWorkspaceLedger(), nextGraphOrder: 40, nextPublicationOrder: 80 },
+		});
+		const running = await harness([{}], { persistence: memory });
+		const result = waitForGraphResult(running.agent, "graph:reserved-orders");
+		await expect(running.agent.submit({ commands: [start("graph:reserved-orders", 1)] })).resolves.toMatchObject({
+			status: "accepted",
+		});
+		expect((await result).results[0]?.state).toBe("succeeded");
+		expect(memory.graphFacts("graph:reserved-orders" as WorkGraphId)).toContainEqual(
+			expect.objectContaining({
+				type: "graph_accepted",
+				order: 40,
+				root: expect.objectContaining({ publicationOrder: 80 }),
+			}),
+		);
+		await running.agent.close();
+	});
+
 	it("reconciles ordinal counters and Session owners from active Work Graph facts", async () => {
 		const liveGate = deferred();
 		const livePersistence = new MemoryWorkspacePersistence();
@@ -3313,8 +3334,8 @@ describe("Work Graph public Interface", () => {
 			}),
 		).resolves.toMatchObject({ status: "rejected", rejection: { code: "session_leased" } });
 		expect(recoveredPersistence.ledgerSnapshot()).toMatchObject({
-			nextGraphOrder: 2,
-			nextPublicationOrder: 3,
+			nextGraphOrder: 3,
+			nextPublicationOrder: 4,
 		});
 
 		const recoveredOldResult = waitForGraphResult(recovered.agent, "graph:ordinal-recovery");

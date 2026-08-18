@@ -18,6 +18,4 @@ Worker; `continue: false` is parsed and ignored. `SubagentStop` uses the Stop
 output algebra. `PermissionRequest` stays outside the event algebra. Command
 Permission still hangs on `PreToolUse`.
 
-This supersedes ADR-0053's sentence that SubagentStart and SubagentStop remain
-outside until delegated-worker lifecycle exists. ADR-0053's body is otherwise
-unchanged.
+This supersedes ADR-0053's deferral of SubagentStart and SubagentStop.

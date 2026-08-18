@@ -85,7 +85,6 @@ async function recover(
 	itemId: string,
 	order: number,
 	graph: string,
-	expectedTargetIdentity?: string,
 ): Promise<Placement> {
 	const reservation = await execution.placement.recover({
 		graphId: graph as WorkGraphId,
@@ -94,7 +93,6 @@ async function recover(
 		mode: "write",
 		sourceOrder: order,
 		publicationOrder: order,
-		...(expectedTargetIdentity ? { expectedTargetIdentity } : {}),
 	});
 	await reservation.commit();
 	return reservation.placement;
@@ -281,7 +279,7 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		await execution.placement.close();
 	});
 
-	it("detects target changes before Publication and leaves the recoverable artifact intact", async () => {
+	it("publishes a non-conflicting artifact after the target changes", async () => {
 		const { root, stateRoot } = await repository();
 		const execution = await adapter(root, stateRoot);
 		const worktree = await reserve(execution, "changed-source", 0);
@@ -289,46 +287,21 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		const artifact = (await capture(execution, worktree, "changed-source"))!;
 		await writeFile(join(root, "external.txt"), "external\n", "utf8");
 		await expect(publish(execution, worktree, "changed-source", artifact)).resolves.toMatchObject({
-			state: "not_published",
-			reason: "changed_source",
+			state: "published",
 		});
-		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await readFile(join(root, "artifact.txt"), "utf8")).toBe("artifact\n");
 		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
 		await execution.placement.release({
 			graphId: "graph:git" as WorkGraphId,
 			itemId: "changed-source" as WorkItemId,
 			placement: worktree,
-			preserve: true,
+			preserve: false,
 		});
-		expect((await stat(worktree.root)).isDirectory()).toBe(true);
+		await expect(stat(worktree.root)).rejects.toMatchObject({ code: "ENOENT" });
 		await execution.placement.close();
 	});
 
-	it("detects content changes even when Git porcelain state stays the same", async () => {
-		const { root, stateRoot } = await repository();
-		await writeFile(join(root, "shared.txt"), "dirty baseline\n", "utf8");
-		const execution = await adapter(root, stateRoot);
-		const worktree = await reserve(execution, "same-status-change", 0);
-		await writeFile(join(worktree.root, "artifact.txt"), "artifact\n", "utf8");
-		const artifact = (await capture(execution, worktree, "same-status-change"))!;
-		await writeFile(join(root, "shared.txt"), "externally changed\n", "utf8");
-
-		await expect(publish(execution, worktree, "same-status-change", artifact)).resolves.toMatchObject({
-			state: "not_published",
-			reason: "changed_source",
-		});
-		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-		expect(await readFile(join(root, "shared.txt"), "utf8")).toBe("externally changed\n");
-		await execution.placement.release({
-			graphId: "graph:git" as WorkGraphId,
-			itemId: "same-status-change" as WorkItemId,
-			placement: worktree,
-			preserve: true,
-		});
-		await execution.placement.close();
-	});
-
-	it("does not let a later Graph reservation adopt an external target change", async () => {
+	it("adopts external target changes when reserving a later Graph", async () => {
 		const { root, stateRoot } = await repository();
 		const execution = await adapter(root, stateRoot);
 		const first = await reserve(execution, "first-root", 0, undefined, "graph:first");
@@ -336,25 +309,63 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		const artifact = (await capture(execution, first, "first-root", "graph:first"))!;
 		await writeFile(join(root, "external.txt"), "external\n", "utf8");
 
-		await expect(reserve(execution, "second-root", 1, undefined, "graph:second")).rejects.toThrow(
-			"Target Workspace changed outside the Adapter before Placement reservation",
-		);
+		const second = await reserve(execution, "second-root", 1, undefined, "graph:second");
+		expect(await readFile(join(second.root, "external.txt"), "utf8")).toBe("external\n");
 		await expect(publish(execution, first, "first-root", artifact, undefined, "graph:first")).resolves.toMatchObject({
-			state: "not_published",
-			reason: "changed_source",
+			state: "published",
 		});
-		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+		expect(await readFile(join(root, "artifact.txt"), "utf8")).toBe("artifact\n");
 		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
 		await execution.placement.release({
 			graphId: "graph:first" as WorkGraphId,
 			itemId: "first-root" as WorkItemId,
 			placement: first,
-			preserve: true,
+			preserve: false,
+		});
+		await execution.placement.release({
+			graphId: "graph:second" as WorkGraphId,
+			itemId: "second-root" as WorkItemId,
+			placement: second,
+			preserve: false,
 		});
 		await execution.placement.close();
 	});
 
-	it("rejects recovery when the Publication target changed after the durable reservation", async () => {
+	it("publishes non-conflicting artifacts from independent Adapters", async () => {
+		const { root, stateRoot } = await repository();
+		const firstExecution = await adapter(root, stateRoot);
+		const secondExecution = await adapter(root, stateRoot);
+		const first = await reserve(firstExecution, "first-root", 0, undefined, "graph:first");
+		const second = await reserve(secondExecution, "second-root", 0, undefined, "graph:second");
+		await writeFile(join(first.root, "first.txt"), "first\n", "utf8");
+		await writeFile(join(second.root, "second.txt"), "second\n", "utf8");
+		const firstArtifact = (await capture(firstExecution, first, "first-root", "graph:first"))!;
+		const secondArtifact = (await capture(secondExecution, second, "second-root", "graph:second"))!;
+
+		const [firstOutcome, secondOutcome] = await Promise.all([
+			publish(firstExecution, first, "first-root", firstArtifact, undefined, "graph:first"),
+			publish(secondExecution, second, "second-root", secondArtifact, undefined, "graph:second"),
+		]);
+		expect(firstOutcome).toMatchObject({ state: "published" });
+		expect(secondOutcome).toMatchObject({ state: "published" });
+		expect(await readFile(join(root, "first.txt"), "utf8")).toBe("first\n");
+		expect(await readFile(join(root, "second.txt"), "utf8")).toBe("second\n");
+		await firstExecution.placement.release({
+			graphId: "graph:first" as WorkGraphId,
+			itemId: "first-root" as WorkItemId,
+			placement: first,
+			preserve: false,
+		});
+		await secondExecution.placement.release({
+			graphId: "graph:second" as WorkGraphId,
+			itemId: "second-root" as WorkItemId,
+			placement: second,
+			preserve: false,
+		});
+		await Promise.all([firstExecution.placement.close(), secondExecution.placement.close()]);
+	});
+
+	it("recovers when the Publication target changed after the durable reservation", async () => {
 		const { root, stateRoot } = await repository();
 		const live = await adapter(root, stateRoot);
 		const placement = await reserve(live, "recover-root", 0, undefined, "graph:recover");
@@ -364,46 +375,18 @@ describe("Git worktree Workspace Execution Adapter", () => {
 		await writeFile(join(root, "external.txt"), "external\n", "utf8");
 
 		const recovered = await adapter(root, stateRoot);
-		await expect(recover(recovered, placement, "recover-root", 0, "graph:recover")).rejects.toThrow(
-			"Recovered Publication target changed outside the Adapter",
-		);
-		await expect(readFile(join(root, "artifact.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
-		expect(artifact.reference).toBeTruthy();
-		expect((await stat(placement.root)).isDirectory()).toBe(true);
-		await recovered.placement.close();
-	});
-
-	it("recovers against the latest durably published target identity", async () => {
-		const { root, stateRoot } = await repository();
-		const live = await adapter(root, stateRoot);
-		const first = await reserve(live, "first-root", 0, undefined, "graph:first");
-		const second = await reserve(live, "second-root", 1, undefined, "graph:second");
-		await writeFile(join(first.root, "first.txt"), "first\n", "utf8");
-		await writeFile(join(second.root, "second.txt"), "second\n", "utf8");
-		const firstArtifact = (await capture(live, first, "first-root", "graph:first"))!;
-		const secondArtifact = (await capture(live, second, "second-root", "graph:second"))!;
-		const firstPublication = await publish(live, first, "first-root", firstArtifact, undefined, "graph:first");
-		expect(firstPublication).toMatchObject({ state: "published", targetIdentity: expect.any(String) });
-		if (firstPublication.state === "not_published" || !firstPublication.targetIdentity) {
-			throw new Error("First Publication did not persist a target identity");
-		}
-		await live.placement.close();
-
-		const recovered = await adapter(root, stateRoot);
-		const recoveredSecond = await recover(
-			recovered,
-			second,
-			"second-root",
-			1,
-			"graph:second",
-			firstPublication.targetIdentity,
-		);
+		const recoveredPlacement = await recover(recovered, placement, "recover-root", 0, "graph:recover");
 		await expect(
-			publish(recovered, recoveredSecond, "second-root", secondArtifact, undefined, "graph:second"),
+			publish(recovered, recoveredPlacement, "recover-root", artifact, undefined, "graph:recover"),
 		).resolves.toMatchObject({ state: "published" });
-		expect(await readFile(join(root, "first.txt"), "utf8")).toBe("first\n");
-		expect(await readFile(join(root, "second.txt"), "utf8")).toBe("second\n");
+		expect(await readFile(join(root, "artifact.txt"), "utf8")).toBe("artifact\n");
+		expect(await readFile(join(root, "external.txt"), "utf8")).toBe("external\n");
+		await recovered.placement.release({
+			graphId: "graph:recover" as WorkGraphId,
+			itemId: "recover-root" as WorkItemId,
+			placement: recoveredPlacement,
+			preserve: false,
+		});
 		await recovered.placement.close();
 	});
 });

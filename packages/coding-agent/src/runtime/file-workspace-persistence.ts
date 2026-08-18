@@ -10,17 +10,20 @@ import {
 	mergeWorkGraphCommits,
 	type WorkGraphStore,
 	type WorkGraphStoreRestore,
+	type WorkspaceGraphIndexEntry,
 	type WorkspaceLedger,
 	type WorkspaceLedgerAcceptance,
 	type WorkspaceLedgerRestore,
+	type WorkspaceOrderReservation,
 	type WorkspacePersistence,
 	type WorkspacePersistenceLease,
 	type WorkspaceSessionOwner,
 	type WorkspaceTargetIdentity,
 } from "@coda/runtime/workspace-persistence";
+import { processIsAlive, withFileMutex } from "../host/file-mutex.ts";
 import { type FileSystem, isFileSystemError, type WritableFile } from "../host/file-system.ts";
 
-interface LeaseRecord {
+interface EpochRecord {
 	readonly version: 1;
 	readonly epoch: string;
 	readonly pid: number;
@@ -29,7 +32,7 @@ interface LeaseRecord {
 
 const LEASE_EPOCH_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-function decodeLeaseRecord(source: string): LeaseRecord {
+function decodeEpochRecord(source: string): EpochRecord {
 	const value: unknown = JSON.parse(source);
 	if (
 		typeof value !== "object" ||
@@ -45,18 +48,9 @@ function decodeLeaseRecord(source: string): LeaseRecord {
 		!("acquiredAt" in value) ||
 		typeof value.acquiredAt !== "string"
 	) {
-		throw new Error("Invalid Workspace process lease");
+		throw new Error("Invalid Workspace process epoch");
 	}
-	return value as LeaseRecord;
-}
-
-function ownerProcessIsDead(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return false;
-	} catch (error) {
-		return isFileSystemError(error, "ESRCH");
-	}
+	return value as EpochRecord;
 }
 
 function graphFileName(graphId: WorkGraphId): string {
@@ -119,7 +113,6 @@ class FileWorkGraphStore implements WorkGraphStore {
 		if (this.#closed) throw new Error("Work Graph store is closed");
 		await this.#ensureLoaded();
 		const durable = clone(commit);
-		encodeWorkGraphEnvelope(durable, 1);
 		const envelope = decodeWorkGraphEnvelope(encodeWorkGraphEnvelope(durable, 1), 1);
 		if (envelope.graphId !== this.#graphId) {
 			throw new Error(`Work Graph store ${this.#graphId} cannot append Facts for another Graph`);
@@ -269,31 +262,84 @@ class FileWorkGraphStore implements WorkGraphStore {
 class FileWorkspaceLedger implements WorkspaceLedger {
 	readonly #fileSystem: FileSystem;
 	readonly #path: string;
-	#state: WorkspaceLedgerRestore = emptyWorkspaceLedger();
+	readonly #lockPath: string;
+	readonly #epoch: string;
+	readonly #epochIsLive: (epoch?: string) => Promise<boolean>;
+	#persistentState: WorkspaceLedgerRestore = emptyWorkspaceLedger();
 	#loaded?: Promise<void>;
 	#tail: Promise<void> = Promise.resolve();
 	#failure?: unknown;
 	#closed = false;
 
-	constructor(fileSystem: FileSystem, path: string) {
-		this.#fileSystem = fileSystem;
-		this.#path = path;
+	constructor(options: {
+		readonly fileSystem: FileSystem;
+		readonly path: string;
+		readonly epoch: string;
+		readonly epochIsLive: (epoch?: string) => Promise<boolean>;
+	}) {
+		this.#fileSystem = options.fileSystem;
+		this.#path = options.path;
+		this.#lockPath = `${options.path}.lock`;
+		this.#epoch = options.epoch;
+		this.#epochIsLive = options.epochIsLive;
 	}
 
 	async load(): Promise<WorkspaceLedgerRestore> {
 		if (this.#closed) throw new Error("Workspace Ledger is closed");
 		await this.#ensureLoaded();
-		return clone(this.#state);
+		return clone(this.#visible(this.#persistentState));
+	}
+
+	async refresh(): Promise<WorkspaceLedgerRestore> {
+		if (this.#closed) throw new Error("Workspace Ledger is closed");
+		await this.#tail;
+		if (this.#failure) throw this.#failure;
+		this.#persistentState = await this.#read();
+		return clone(this.#visible(this.#persistentState));
 	}
 
 	isActive(graphId: WorkGraphId): boolean {
-		return this.#state.activeGraphs.some((entry) => entry.graphId === graphId);
+		return this.#persistentState.activeGraphs.some(
+			(entry) => entry.graphId === graphId && entry.ownerEpoch === this.#epoch,
+		);
+	}
+
+	ownerEpoch(graphId: WorkGraphId): string | undefined {
+		return this.#persistentState.activeGraphs.find((entry) => entry.graphId === graphId)?.ownerEpoch;
+	}
+
+	async reserveOrders(request: {
+		readonly graphCount: number;
+		readonly publicationCount: number;
+	}): Promise<WorkspaceOrderReservation> {
+		for (const [name, value] of Object.entries(request)) {
+			if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+		}
+		return this.#transact((state) => {
+			const graphOrderStart = state.nextGraphOrder;
+			const publicationOrderStart = state.nextPublicationOrder;
+			const nextGraphOrder = graphOrderStart + request.graphCount;
+			const nextPublicationOrder = publicationOrderStart + request.publicationCount;
+			if (!Number.isSafeInteger(nextGraphOrder) || !Number.isSafeInteger(nextPublicationOrder)) {
+				throw new Error("Workspace order reservation exceeds the safe integer range");
+			}
+			return {
+				state: { ...state, nextGraphOrder, nextPublicationOrder },
+				result: { graphOrderStart, publicationOrderStart, nextGraphOrder, nextPublicationOrder },
+			};
+		});
 	}
 
 	accept(acceptance: WorkspaceLedgerAcceptance): Promise<void> {
 		return this.#mutate((state) => {
 			const active = new Map(state.activeGraphs.map((entry) => [entry.graphId, entry]));
-			for (const entry of acceptance.activeGraphs) active.set(entry.graphId, clone(entry));
+			for (const entry of acceptance.activeGraphs) {
+				const existing = active.get(entry.graphId);
+				if (existing?.ownerEpoch && existing.ownerEpoch !== this.#epoch) {
+					throw new Error(`Work Graph is owned by another Workspace epoch: ${entry.graphId}`);
+				}
+				active.set(entry.graphId, { ...clone(entry), ownerEpoch: this.#epoch });
+			}
 			const owners = new Map(state.sessionOwners.map((owner) => [owner.sessionId, owner]));
 			for (const owner of acceptance.sessionOwners) {
 				const existing = owners.get(owner.sessionId);
@@ -360,33 +406,100 @@ class FileWorkspaceLedger implements WorkspaceLedger {
 	}
 
 	async #load(): Promise<void> {
+		await withFileMutex({
+			fileSystem: this.#fileSystem,
+			path: this.#lockPath,
+			operation: async () => {
+				const current = await this.#read();
+				const claimed = await this.#claimRecoverableGraphs(current);
+				if (claimed.changed) {
+					const encoded = encodeWorkspaceLedger(claimed.state);
+					await this.#replace(`${encoded}\n`);
+					this.#persistentState = decodeWorkspaceLedger(encoded);
+				} else {
+					this.#persistentState = claimed.state;
+				}
+			},
+		});
+	}
+
+	async #claimRecoverableGraphs(state: WorkspaceLedgerRestore): Promise<{
+		readonly state: WorkspaceLedgerRestore;
+		readonly changed: boolean;
+	}> {
+		let changed = false;
+		const activeGraphs: WorkspaceGraphIndexEntry[] = [];
+		for (const entry of state.activeGraphs) {
+			if (entry.ownerEpoch === this.#epoch) {
+				activeGraphs.push(entry);
+				continue;
+			}
+			const live = await this.#epochIsLive(entry.ownerEpoch);
+			if (live) {
+				activeGraphs.push(entry);
+				continue;
+			}
+			activeGraphs.push({ ...entry, ownerEpoch: this.#epoch });
+			changed = true;
+		}
+		return { state: { ...state, activeGraphs, diagnostics: [] }, changed };
+	}
+
+	#visible(state: WorkspaceLedgerRestore): WorkspaceLedgerRestore {
+		const activeGraphs = state.activeGraphs.filter((entry) => entry.ownerEpoch === this.#epoch);
+		const visible = new Set(activeGraphs.map((entry) => entry.graphId));
+		return {
+			...state,
+			activeGraphs,
+			sessionOwners: state.sessionOwners.filter((owner) => visible.has(owner.graphId)),
+			diagnostics: [],
+		};
+	}
+
+	async #read(): Promise<WorkspaceLedgerRestore> {
 		try {
-			this.#state = decodeWorkspaceLedger(new TextDecoder().decode(await this.#fileSystem.readFile(this.#path)));
+			return decodeWorkspaceLedger(new TextDecoder().decode(await this.#fileSystem.readFile(this.#path)));
 		} catch (error) {
 			if (!isFileSystemError(error, "ENOENT")) throw error;
-			this.#state = emptyWorkspaceLedger();
+			return emptyWorkspaceLedger();
 		}
 	}
 
-	async #mutate(change: (state: WorkspaceLedgerRestore) => WorkspaceLedgerRestore): Promise<void> {
+	#mutate(change: (state: WorkspaceLedgerRestore) => WorkspaceLedgerRestore): Promise<void> {
+		return this.#transact((state) => ({ state: change(state), result: undefined }));
+	}
+
+	async #transact<Result>(
+		change: (state: WorkspaceLedgerRestore) => { readonly state: WorkspaceLedgerRestore; readonly result: Result },
+	): Promise<Result> {
 		if (this.#closed) throw new Error("Workspace Ledger is closed");
 		await this.#ensureLoaded();
 		const operation = this.#tail.then(async () => {
 			if (this.#failure) throw this.#failure;
-			const next = decodeWorkspaceLedger(encodeWorkspaceLedger(change(clone(this.#state))));
-			try {
-				await this.#replace(`${encodeWorkspaceLedger(next)}\n`);
-				this.#state = next;
-			} catch (error) {
-				this.#failure ??= error;
-				throw error;
-			}
+			return withFileMutex({
+				fileSystem: this.#fileSystem,
+				path: this.#lockPath,
+				operation: async () => {
+					const current = await this.#read();
+					const changed = change(clone(current));
+					const encoded = encodeWorkspaceLedger(changed.state);
+					const next = decodeWorkspaceLedger(encoded);
+					try {
+						await this.#replace(`${encoded}\n`);
+						this.#persistentState = next;
+						return changed.result;
+					} catch (error) {
+						this.#failure ??= error;
+						throw error;
+					}
+				},
+			});
 		});
 		this.#tail = operation.then(
 			() => undefined,
 			() => undefined,
 		);
-		await operation;
+		return operation;
 	}
 
 	async #replace(value: string): Promise<void> {
@@ -422,63 +535,58 @@ class FileWorkspacePersistence implements WorkspacePersistence {
 	async acquire(): Promise<WorkspacePersistenceLease> {
 		if (this.#leased) throw new Error("Workspace persistence lease is already held by this process");
 		await this.#fileSystem.makeDirectory(this.#root, { recursive: true, mode: 0o700 });
-		const leasePath = join(this.#root, "workspace.lease");
-		let leaseHandle: WritableFile;
-		const createLease = () => this.#fileSystem.open(leasePath, "wx", 0o600);
-		try {
-			leaseHandle = await createLease();
-		} catch (error) {
-			if (!isFileSystemError(error, "EEXIST")) throw error;
-			const existing = decodeLeaseRecord(new TextDecoder().decode(await this.#fileSystem.readFile(leasePath)));
-			if (!ownerProcessIsDead(existing.pid)) {
-				throw new Error(`Workspace process lease is already held: ${this.#root}`, { cause: error });
-			}
-			await this.#fileSystem.rename(leasePath, `${leasePath}.stale-${existing.epoch}-${randomUUID()}`);
-			try {
-				leaseHandle = await createLease();
-			} catch (retryError) {
-				if (isFileSystemError(retryError, "EEXIST")) {
-					throw new Error(`Workspace process lease is already held: ${this.#root}`, { cause: retryError });
-				}
-				throw retryError;
-			}
-		}
 		const epoch = randomUUID();
-		const leaseRecord: LeaseRecord = {
+		const epochRoot = join(this.#root, "epochs");
+		const epochPath = join(epochRoot, `${epoch}.json`);
+		await this.#fileSystem.makeDirectory(epochRoot, { recursive: true, mode: 0o700 });
+		const epochHandle = await this.#fileSystem.open(epochPath, "wx", 0o600);
+		const epochRecord: EpochRecord = {
 			version: 1,
 			epoch,
 			pid: process.pid,
 			acquiredAt: new Date().toISOString(),
 		};
 		try {
-			await leaseHandle.write(`${JSON.stringify(leaseRecord)}\n`);
-			await leaseHandle.sync();
+			await epochHandle.write(`${JSON.stringify(epochRecord)}\n`);
+			await epochHandle.sync();
 		} catch (error) {
-			await leaseHandle.close().catch(() => undefined);
-			await this.#fileSystem.removeFile(leasePath).catch(() => undefined);
+			await epochHandle.close().catch(() => undefined);
+			await this.#fileSystem.removeFile(epochPath).catch(() => undefined);
 			throw error;
+		} finally {
+			await epochHandle.close().catch(() => undefined);
 		}
-		const ledger = new FileWorkspaceLedger(this.#fileSystem, join(this.#root, "ledger.json"));
+		const epochIsLive = async (candidate?: string): Promise<boolean> => {
+			const candidatePath = candidate ? join(epochRoot, `${candidate}.json`) : join(this.#root, "workspace.lease");
+			try {
+				const record = decodeEpochRecord(new TextDecoder().decode(await this.#fileSystem.readFile(candidatePath)));
+				const live = (candidate === undefined || record.epoch === candidate) && processIsAlive(record.pid);
+				if (candidate !== undefined && !live) {
+					await this.#fileSystem.removeFile(candidatePath).catch(() => undefined);
+				}
+				return live;
+			} catch (error) {
+				if (isFileSystemError(error, "ENOENT")) return false;
+				return true;
+			}
+		};
+		const ledger = new FileWorkspaceLedger({
+			fileSystem: this.#fileSystem,
+			path: join(this.#root, "ledger.json"),
+			epoch,
+			epochIsLive,
+		});
 		const activeRoot = join(this.#root, "graphs", "active");
 		const archiveRoot = join(this.#root, "graphs", "archive");
 		const orphanRoot = join(this.#root, "graphs", "orphan");
 		try {
-			const restored = await ledger.load();
+			await ledger.load();
 			await this.#fileSystem.makeDirectory(activeRoot, { recursive: true, mode: 0o700 });
 			await this.#fileSystem.makeDirectory(archiveRoot, { recursive: true, mode: 0o700 });
 			await this.#fileSystem.makeDirectory(orphanRoot, { recursive: true, mode: 0o700 });
-			const indexedFiles = new Set(restored.activeGraphs.map(({ graphId }) => graphFileName(graphId)));
-			for (const entry of await this.#fileSystem.readDirectory(activeRoot)) {
-				if (entry.kind !== "file" || !entry.name.endsWith(".jsonl") || indexedFiles.has(entry.name)) continue;
-				await this.#fileSystem.rename(
-					join(activeRoot, entry.name),
-					join(orphanRoot, `${entry.name}.orphan-${epoch}`),
-				);
-			}
 		} catch (error) {
 			await ledger.close().catch(() => undefined);
-			await leaseHandle.close().catch(() => undefined);
-			await this.#fileSystem.removeFile(leasePath).catch(() => undefined);
+			await this.#fileSystem.removeFile(epochPath).catch(() => undefined);
 			throw error;
 		}
 		this.#leased = true;
@@ -502,10 +610,17 @@ class FileWorkspacePersistence implements WorkspacePersistence {
 				if (closed) throw new Error("Workspace persistence lease is closed");
 				const current = stores.get(graphId);
 				if (current) return current;
+				await ledger.refresh();
+				const owner = ledger.ownerEpoch(graphId);
+				if (owner && owner !== epoch) throw new Error(`Work Graph is active in another process: ${graphId}`);
 				if (await exists(this.#fileSystem, archivePath(graphId))) {
 					throw new Error(`Work Graph is archived: ${graphId}`);
 				}
-				const store = new FileWorkGraphStore(this.#fileSystem, graphId, activePath(graphId), {
+				const path = activePath(graphId);
+				if (!ledger.isActive(graphId) && (await exists(this.#fileSystem, path))) {
+					await this.#fileSystem.rename(path, join(orphanRoot, `${graphFileName(graphId)}.orphan-${epoch}`));
+				}
+				const store = new FileWorkGraphStore(this.#fileSystem, graphId, path, {
 					mustExist: ledger.isActive(graphId),
 				});
 				stores.set(graphId, store);
@@ -518,7 +633,7 @@ class FileWorkspacePersistence implements WorkspacePersistence {
 					return new FileWorkGraphStore(this.#fileSystem, graphId, archived, { mustExist: true, readOnly: true });
 				}
 				const unrelocated = activePath(graphId);
-				if (!ledger.isActive(graphId) && (await exists(this.#fileSystem, unrelocated))) {
+				if (!ledger.ownerEpoch(graphId) && (await exists(this.#fileSystem, unrelocated))) {
 					return new FileWorkGraphStore(this.#fileSystem, graphId, unrelocated, {
 						mustExist: true,
 						readOnly: true,
@@ -556,18 +671,13 @@ class FileWorkspacePersistence implements WorkspacePersistence {
 					failures.push(error);
 				}
 				try {
-					await leaseHandle.close();
-				} catch (error) {
-					failures.push(error);
-				}
-				try {
-					const persistedLease = decodeLeaseRecord(
-						new TextDecoder().decode(await this.#fileSystem.readFile(leasePath)),
+					const persistedEpoch = decodeEpochRecord(
+						new TextDecoder().decode(await this.#fileSystem.readFile(epochPath)),
 					);
-					if (persistedLease.epoch !== epoch) {
-						throw new Error(`Workspace process lease ownership changed: ${this.#root}`);
+					if (persistedEpoch.epoch !== epoch) {
+						throw new Error(`Workspace process epoch ownership changed: ${this.#root}`);
 					}
-					await this.#fileSystem.removeFile(leasePath);
+					await this.#fileSystem.removeFile(epochPath);
 				} catch (error) {
 					if (!isFileSystemError(error, "ENOENT")) failures.push(error);
 				}

@@ -236,6 +236,7 @@ export interface WorkGraphStore {
 export interface WorkspaceGraphIndexEntry {
 	readonly graphId: WorkGraphId;
 	readonly order: number;
+	readonly ownerEpoch?: string;
 }
 
 export interface WorkspaceSessionOwner {
@@ -265,9 +266,21 @@ export interface WorkspaceLedgerAcceptance {
 	readonly sessionOwners: readonly WorkspaceSessionOwner[];
 }
 
+export interface WorkspaceOrderReservation {
+	readonly graphOrderStart: number;
+	readonly publicationOrderStart: number;
+	readonly nextGraphOrder: number;
+	readonly nextPublicationOrder: number;
+}
+
 /** Small Workspace-global ordering and ownership record. It never stores Graph facts. */
 export interface WorkspaceLedger {
 	load(): Promise<WorkspaceLedgerRestore>;
+	/** Atomically reserves Workspace-wide ordinals. */
+	reserveOrders(request: {
+		readonly graphCount: number;
+		readonly publicationCount: number;
+	}): Promise<WorkspaceOrderReservation>;
 	accept(acceptance: WorkspaceLedgerAcceptance): Promise<void>;
 	releaseSession(owner: WorkspaceSessionOwner): Promise<void>;
 	recordTargetIdentity(identity: WorkspaceTargetIdentity): Promise<void>;
@@ -276,7 +289,7 @@ export interface WorkspaceLedger {
 	close(): Promise<void>;
 }
 
-/** Explicit process epoch. Closing it releases every Graph store and the Workspace process lease. */
+/** Explicit process epoch. Closing it releases every Graph store owned by this epoch. */
 export interface WorkspacePersistenceLease {
 	readonly epoch: string;
 	readonly ledger: WorkspaceLedger;

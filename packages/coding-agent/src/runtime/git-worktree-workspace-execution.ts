@@ -8,6 +8,8 @@ import type {
 	WorkspaceExecution,
 	WorkspacePlacementDescriptor,
 } from "@coda/runtime";
+import { withFileMutex } from "../host/file-mutex.ts";
+import { createNodeFileSystem } from "../host/node-file-system.ts";
 import type { ProcessRunner, ProcessRunResult } from "../host/process-runner.ts";
 
 type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
@@ -130,7 +132,6 @@ interface PlacementState {
 	readonly target: PublicationTarget;
 	readonly publications: PublicationSequencer;
 	readonly mutations: TargetMutationGate;
-	knownFingerprint: string;
 	ticket?: PublicationTicket;
 	artifactRef?: string;
 	preserve: boolean;
@@ -141,7 +142,6 @@ interface PublicationTarget {
 	readonly repoRoot: string;
 	readonly publications: PublicationSequencer;
 	readonly mutations: TargetMutationGate;
-	knownFingerprint: string;
 }
 
 export interface GitWorktreeToolRequest {
@@ -174,6 +174,7 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 	const gitExecutable = options.gitExecutable ?? "git";
 	const sourceRoot = await realpath(resolve(options.sourceRoot));
 	const stateRoot = resolve(options.stateRoot);
+	const fileSystem = createNodeFileSystem();
 	await mkdir(stateRoot, { recursive: true });
 	const runGit = async (
 		cwd: string,
@@ -221,19 +222,17 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 		}
 	};
 	const fingerprint = async (repoRoot: string, signal?: AbortSignal): Promise<string> => {
-		const [head, status, tree] = await Promise.all([
+		const [head, tree] = await Promise.all([
 			checkedGit(repoRoot, ["rev-parse", "HEAD"], signal),
-			checkedGit(repoRoot, ["status", "--porcelain=v2", "-z", "--untracked-files=all"], signal),
 			workspaceTree(repoRoot, signal),
 		]);
-		return createHash("sha256").update(head).update("\0").update(status).update("\0").update(tree).digest("hex");
+		return createHash("sha256").update(head).update("\0").update(tree).digest("hex");
 	};
 	const sourceTarget: PublicationTarget = {
 		placementId: `git-source:${createHash("sha256").update(sourceRepoRoot).digest("hex").slice(0, 16)}`,
 		repoRoot: sourceRepoRoot,
 		publications: new PublicationSequencer(),
 		mutations: new TargetMutationGate(),
-		knownFingerprint: await fingerprint(sourceRepoRoot),
 	};
 	const states = new Map<string, PlacementState>();
 	const itemStates = new Map<string, PlacementState>();
@@ -261,16 +260,34 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 		if (!state) throw new Error(`Parent Workspace Placement is not owned by this Adapter: ${parent.placementId}`);
 		return state;
 	};
-	const assertTargetUnchanged = async (
+	const mutateTarget = <Result>(
 		target: PublicationTarget,
-		operation: string,
+		operation: () => Promise<Result>,
 		signal?: AbortSignal,
-	): Promise<string> => {
-		const current = await fingerprint(target.repoRoot, signal);
-		if (current !== target.knownFingerprint) {
-			throw new Error(`Target Workspace changed outside the Adapter before ${operation}: ${target.placementId}`);
-		}
-		return current;
+	): Promise<Result> =>
+		target.mutations.run(async () => {
+			const locks = join(stateRoot, "locks");
+			await mkdir(locks, { recursive: true });
+			const identity = createHash("sha256").update(target.repoRoot).digest("hex").slice(0, 24);
+			return withFileMutex({
+				fileSystem,
+				path: join(locks, `target-${identity}.lock`),
+				operation,
+				...(signal ? { signal } : {}),
+			});
+		});
+	const placementState = (
+		fields: Omit<PlacementState, "publications" | "mutations" | "preserve" | "ticket" | "artifactRef">,
+	): PlacementState => ({
+		...fields,
+		publications: new PublicationSequencer(),
+		mutations: new TargetMutationGate(),
+		preserve: false,
+	});
+	const remember = (state: PlacementState): PlacementState => {
+		states.set(state.descriptor.placementId, state);
+		itemStates.set(itemKey(state.graphId, state.itemId), state);
+		return state;
 	};
 	const createPlacement = async (request: Parameters<WorkspaceExecution["placement"]["reserve"]>[0]) => {
 		const graphId = String(request.graphId);
@@ -284,41 +301,30 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 				root,
 				baseIdentity: await checkedGit(repoRoot, ["rev-parse", "HEAD"]),
 				targetPlacementId: target.placementId,
-				targetIdentity: target.knownFingerprint,
+				targetIdentity: await fingerprint(target.repoRoot),
 				kind: "git_worktree",
 			};
-			const state: PlacementState = {
-				placementId: descriptor.placementId,
-				graphId,
-				itemId: workItemId,
-				descriptor,
-				repoRoot,
-				workspacePrefix: relative(repoRoot, root),
-				worktreeRoot: repoRoot,
-				baseCommit: descriptor.baseIdentity,
-				publicationOrder: request.publicationOrder,
-				derived: false,
-				target,
-				publications: new PublicationSequencer(),
-				mutations: new TargetMutationGate(),
-				knownFingerprint: await fingerprint(repoRoot),
-				preserve: false,
-			};
-			states.set(descriptor.placementId, state);
-			itemStates.set(itemKey(graphId, workItemId), state);
-			return state;
+			return remember(
+				placementState({
+					placementId: descriptor.placementId,
+					graphId,
+					itemId: workItemId,
+					descriptor,
+					repoRoot,
+					workspacePrefix: relative(repoRoot, root),
+					worktreeRoot: repoRoot,
+					baseCommit: descriptor.baseIdentity,
+					publicationOrder: request.publicationOrder,
+					derived: false,
+					target,
+				}),
+			);
 		}
 		const targetRepoRoot = target.repoRoot;
-		const frozenTarget = await target.mutations.run(async () => {
-			const before = await assertTargetUnchanged(target, "Placement reservation");
+		const { baseCommit, targetIdentity } = await mutateTarget(target, async () => {
 			const commit = await freeze(targetRepoRoot, `Coda placement base ${graphId}/${workItemId}`);
-			const after = await fingerprint(targetRepoRoot);
-			if (after !== before) {
-				throw new Error(`Target Workspace changed while reserving Placement: ${target.placementId}`);
-			}
-			return { baseCommit: commit, targetIdentity: before };
+			return { baseCommit: commit, targetIdentity: await fingerprint(targetRepoRoot) };
 		});
-		const { baseCommit, targetIdentity } = frozenTarget;
 		const worktreeRoot = join(stateRoot, "worktrees", stableName(graphId, workItemId));
 		await mkdir(join(stateRoot, "worktrees"), { recursive: true });
 		await checkedGit(targetRepoRoot, ["worktree", "add", "--detach", worktreeRoot, baseCommit]);
@@ -331,26 +337,21 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 			targetIdentity,
 			kind: "git_worktree",
 		};
-		const state: PlacementState = {
-			placementId: descriptor.placementId,
-			graphId,
-			itemId: workItemId,
-			descriptor,
-			repoRoot: worktreeRoot,
-			workspacePrefix,
-			worktreeRoot,
-			baseCommit,
-			publicationOrder: request.publicationOrder,
-			derived: true,
-			target,
-			publications: new PublicationSequencer(),
-			mutations: new TargetMutationGate(),
-			knownFingerprint: await fingerprint(worktreeRoot),
-			preserve: false,
-		};
-		states.set(descriptor.placementId, state);
-		itemStates.set(itemKey(graphId, workItemId), state);
-		return state;
+		return remember(
+			placementState({
+				placementId: descriptor.placementId,
+				graphId,
+				itemId: workItemId,
+				descriptor,
+				repoRoot: worktreeRoot,
+				workspacePrefix,
+				worktreeRoot,
+				baseCommit,
+				publicationOrder: request.publicationOrder,
+				derived: true,
+				target,
+			}),
+		);
 	};
 	const bind = (state: PlacementState, contribution: WorkspaceToolContribution): AgentTool => {
 		const tool = contribution.tool;
@@ -361,12 +362,7 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 				context: ToolExecutionContext,
 			): Promise<ToolExecutionOutput> => {
 				if (contribution.effect === "read") return tool.execute(arguments_, context);
-				return state.mutations.run(async () => {
-					await assertTargetUnchanged(state, `Tool mutation ${tool.name}`, context.signal);
-					const output = await tool.execute(arguments_, context);
-					state.knownFingerprint = await fingerprint(state.repoRoot, context.signal);
-					return output;
-				});
+				return state.mutations.run(async () => tool.execute(arguments_, context));
 			},
 		} as AgentTool);
 	};
@@ -411,15 +407,8 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 					`Recovered Publication target changed from ${descriptor.targetPlacementId} to ${target.placementId}`,
 				);
 			}
-			const expectedTargetIdentity = request.expectedTargetIdentity ?? descriptor.targetIdentity;
-			await target.mutations.run(async () => {
-				const current = await fingerprint(target.repoRoot);
-				if (current !== expectedTargetIdentity) {
-					throw new Error(`Recovered Publication target changed outside the Adapter: ${target.placementId}`);
-				}
-				target.knownFingerprint = current;
-			});
-			const state: PlacementState = {
+			await mutateTarget(target, async () => undefined);
+			const state = placementState({
 				placementId: descriptor.placementId,
 				graphId: String(request.graphId),
 				itemId: String(request.itemId),
@@ -431,16 +420,11 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 				publicationOrder: request.publicationOrder,
 				derived: request.mode === "write",
 				target,
-				publications: new PublicationSequencer(),
-				mutations: new TargetMutationGate(),
-				knownFingerprint: await fingerprint(repoRoot),
-				preserve: false,
-			};
+			});
 			return {
 				placement: descriptor,
 				commit: async () => {
-					states.set(descriptor.placementId, state);
-					itemStates.set(itemKey(state.graphId, state.itemId), state);
+					remember(state);
 					state.ticket ??= state.target.publications.register(state.publicationOrder);
 				},
 				rollback: async () => state.ticket?.settle(),
@@ -487,57 +471,64 @@ export async function createGitWorktreeWorkspaceExecution(options: {
 			if (!state.ticket) throw new Error(`Workspace Placement was not committed: ${state.descriptor.placementId}`);
 			await state.ticket.wait(request.signal);
 			try {
-				return await state.target.mutations.run(async () => {
-					const targetPlacementId = state.target.placementId;
-					const targetRepoRoot = state.target.repoRoot;
-					const currentFingerprint = await fingerprint(targetRepoRoot, request.signal);
-					if (currentFingerprint !== state.target.knownFingerprint) {
-						state.preserve = true;
-						return {
-							state: "not_published",
-							targetPlacementId,
-							reason: "changed_source",
-							diagnostic: "Target Workspace changed outside the Adapter after Placement",
-						} as const;
-					}
-					const temporary = await mkdtemp(join(stateRoot, "publication-"));
-					const patch = join(temporary, "artifact.patch");
-					try {
-						await checkedGit(
-							state.repoRoot,
-							["diff", "--binary", "--full-index", `--output=${patch}`, state.baseCommit, artifactReference],
-							request.signal,
-						);
-						if ((await readFile(patch)).byteLength === 0) {
+				return await mutateTarget(
+					state.target,
+					async () => {
+						const targetPlacementId = state.target.placementId;
+						const targetRepoRoot = state.target.repoRoot;
+						const currentFingerprint = await fingerprint(targetRepoRoot, request.signal);
+						const temporary = await mkdtemp(join(stateRoot, "publication-"));
+						const patch = join(temporary, "artifact.patch");
+						try {
+							await checkedGit(
+								state.repoRoot,
+								["diff", "--binary", "--full-index", `--output=${patch}`, state.baseCommit, artifactReference],
+								request.signal,
+							);
+							if ((await readFile(patch)).byteLength === 0) {
+								return {
+									state: "not_required",
+									targetPlacementId,
+									targetIdentity: currentFingerprint,
+								} as const;
+							}
+							const check = await runGit(
+								targetRepoRoot,
+								["apply", "--check", "--binary", patch],
+								request.signal,
+							);
+							if (check.exitCode !== 0 || check.timedOut) {
+								state.preserve = true;
+								return {
+									state: "not_published",
+									targetPlacementId,
+									reason: "conflict",
+									diagnostic: (check.stderr || check.stdout).trim(),
+								} as const;
+							}
+							const applied = await runGit(targetRepoRoot, ["apply", "--binary", patch], request.signal);
+							if (applied.exitCode !== 0 || applied.timedOut) {
+								state.preserve = true;
+								return {
+									state: "not_published",
+									targetPlacementId,
+									reason: "conflict",
+									diagnostic: (applied.stderr || applied.stdout).trim(),
+								} as const;
+							}
+							const targetIdentity = await fingerprint(targetRepoRoot, request.signal);
 							return {
-								state: "not_required",
+								state: "published",
+								publicationId: `git-publication:${state.graphId}:${state.itemId}`,
 								targetPlacementId,
-								targetIdentity: state.target.knownFingerprint,
+								targetIdentity,
 							} as const;
+						} finally {
+							await rm(temporary, { recursive: true, force: true });
 						}
-						const check = await runGit(targetRepoRoot, ["apply", "--check", "--binary", patch], request.signal);
-						if (check.exitCode !== 0 || check.timedOut) {
-							state.preserve = true;
-							return {
-								state: "not_published",
-								targetPlacementId,
-								reason: "conflict",
-								diagnostic: (check.stderr || check.stdout).trim(),
-							} as const;
-						}
-						await checkedGit(targetRepoRoot, ["apply", "--binary", patch], request.signal);
-						const targetIdentity = await fingerprint(targetRepoRoot, request.signal);
-						state.target.knownFingerprint = targetIdentity;
-						return {
-							state: "published",
-							publicationId: `git-publication:${state.graphId}:${state.itemId}`,
-							targetPlacementId,
-							targetIdentity,
-						} as const;
-					} finally {
-						await rm(temporary, { recursive: true, force: true });
-					}
-				});
+					},
+					request.signal,
+				);
 			} finally {
 				state.ticket.settle();
 			}

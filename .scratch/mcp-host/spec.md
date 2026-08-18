@@ -6,6 +6,7 @@ Current package and Run-lease ownership is documented in
 [`packages/mcp/README.md`](../../packages/mcp/README.md),
 [`packages/runtime/README.md`](../../packages/runtime/README.md), and
 [`ADR-0043`](../../docs/adr/0043-extract-instance-local-agent-runtime.md).
+The design below is retained as implementation history.
 
 Implement Coda as an MCP Host/Client that gives external Server Tools to the Coding Agent. The normative protocol is MCP 2026-07-28 through the exact-pinned official TypeScript SDK v2, with tested legacy compatibility for 2025-11-25 and 2025-06-18.
 

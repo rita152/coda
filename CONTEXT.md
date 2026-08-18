@@ -20,13 +20,25 @@ _Avoid_: Session, transcript, Run group, task list
 One independently schedulable unit in a Work Graph, owned by exactly one Worker Runtime and settled with one Work Result.
 _Avoid_: Run, Turn, subagent, thread
 
+**Work Execution Mode**:
+The `read_only` or `write` classification belonging to one Work Item.
+_Avoid_: Process Confinement Mode, Approval Policy, sandbox mode
+
+**Delegate**:
+The parent-Run Tool through which a Worker Runtime admits child Work Items into the same Work Graph.
+_Avoid_: subagent Tool, spawn, nested Agent
+
 **Worker Runtime**:
 A private Agent Runtime exclusively owned by one Work Item and attached to that Work Item's Session for its lifetime.
 _Avoid_: child Agent, shared Runtime, worker process
 
 **Workspace Ledger**:
-The small durable record of facts that must be ordered across a Workspace: active Work Graph identities, Session ownership, Publication ordinals, and settled target identities.
+The small durable record that transactionally coordinates facts which must be ordered across a Workspace: active Work Graph identities, Session ownership, Publication ordinals, and settled target identities.
 _Avoid_: Work Graph history, Session journal, global event log
+
+**Workspace Process Epoch**:
+One live Coding Agent process's ownership scope over its active Work Graph stores and process-local coordination. Multiple epochs may share one Workspace without taking ownership of each other's live Work.
+_Avoid_: Workspace lock, exclusive process lease, Session
 
 **Work Graph Store**:
 The isolated durable history of one Work Graph, composed of atomically appended Work Graph Fact segments and archived after terminal settlement.
@@ -49,8 +61,8 @@ A full-fidelity, best-effort projection of live Worker Runtime activity delivere
 _Avoid_: Worker Fact, Worker Control, event log
 
 **Work Result**:
-The structured settled outcome of one Work Item, including its Run outcome, evidence, any Workspace Artifact, and whether its terminal boundary is durably confirmed or only process-local and unknown; assistant prose alone is not a Work Result.
-_Avoid_: final message, summary, Run
+The structured settled outcome of one Work Item, including its Run Outcome, evidence, any Workspace Artifact, and whether its terminal boundary is durably confirmed or only process-local and unknown; assistant prose alone is not a Work Result.
+_Avoid_: final message, summary, Run, Completion Disposition
 
 **Workspace Placement**:
 The resolved Workspace root in which one Work Item executes, together with its relationship to the source Workspace state.
@@ -65,7 +77,7 @@ The explicit settlement that applies one or more Workspace Artifacts to their pa
 _Avoid_: Tool write, implicit merge, successful Run
 
 **Publication Order**:
-The immutable Workspace-wide ordinal assigned when a Work Item is accepted and enforced by the Workspace Adapter's target-local Publication sequencer.
+The immutable Workspace-wide ordinal reserved for one Work Item. It determines target-local Publication order within a Workspace Process Epoch; Publications from different epochs settle through serialized target mutation and artifact conflict detection.
 _Avoid_: completion order, Graph-local sibling order, merge timestamp
 
 **Agent**:
@@ -92,9 +104,17 @@ _Avoid_: Prepared Run, global selected Model
 One settled Agent operation beginning with accepted input and ending after its serial lifecycle and fatal Session barriers; presentation observations are outside that boundary.
 _Avoid_: Session, process
 
+**Run Outcome**:
+The Agent lifecycle settlement of one Run: `success`, `error`, or `aborted`.
+_Avoid_: Completion Disposition, Work Result, verified
+
 **Run Budget**:
 An immutable per-Run set of execution limits whose accounting includes every Attempt and Tool Invocation, including discarded retries.
-_Avoid_: timeout, quota, Session limit
+_Avoid_: timeout, quota, Session limit, Run Control
+
+**Run Control**:
+An optional two-phase wall-clock envelope on one Run, independent of Run Budget, consisting of a work window, a finalization grace, and an optional stationary-Turn trigger.
+_Avoid_: Run Budget, timeout, quota
 
 **Turn**:
 One assistant response together with the complete batch of Tool Invocations requested by that response.
@@ -120,6 +140,10 @@ _Avoid_: Agent Seed, retry, transcript Message
 The Coding Agent's bottom-docked input experience that combines the generic Editor with Attachments, queue commands, Reasoning-level styling, and submission policy.
 _Avoid_: Editor, Prompt Builder, User Message
 
+**Slash Command**:
+A registered `/name` Composer invocation, distinct from ordinary Prompt text and from `$` Skill or MCP Mentions.
+_Avoid_: Skill Mention, MCP Mention
+
 **Composer Submission**:
 A durable fact that the interactive Composer accepted model-directed input, preserving the text as edited independently from when or whether the Agent later consumes it.
 _Avoid_: Message, Follow-up lifecycle, Shell command
@@ -141,7 +165,7 @@ An ordered, failure-isolated control projection that may submit a Work Item Inpu
 _Avoid_: Observation, persistence barrier, direct Agent access
 
 **Interactive Input Adapter**:
-The Coding Agent UI adapter that owns local Composer/User Shell ordering, translates model-directed input into Work Item commands, and projects isolated observations into presentation state.
+The Coding Agent UI adapter that owns local Composer/User Shell ordering, translates model-directed input into Work Item commands, and projects isolated observations into presentation state. Child Worker Observations reach the focused parent Session's Timeline, Transcript View, Activity, Command Permission, and MCP Elicitation without being replayed as the parent Run.
 _Avoid_: Work Coordinator, Worker Runtime, Composer
 
 **User Shell**:
@@ -165,11 +189,12 @@ The executor boundary outcome stating whether a Tool returned, threw, or was abo
 _Avoid_: Tool Observation, exit status, Tool result
 
 **Lifecycle Hook**:
-A user-configured reaction at a named Coding Agent lifecycle boundary that may contribute context, guard an operation, or request continued work according to that boundary's contract.
-_Avoid_: Tool, plugin, event listener
+A user-configured reaction at a named Coding Agent lifecycle boundary that may contribute context, guard an operation, or request continued work according to that boundary's contract. Codex `SubagentStart` and `SubagentStop` names mark child Work Item running and terminal boundaries; they are not a separate subagent entity.
+_Avoid_: Tool, plugin, event listener, subagent
 
 **Hook Handler Trust**:
-The decision to execute one exact Lifecycle Hook handler revision; changing the handler invalidates the decision without disabling unrelated handlers.
+The decision to execute one exact Lifecycle Hook handler revision (exact-handler trust); changing the handler invalidates the decision without disabling unrelated handlers.
+_Avoid_: Project Trust, MCP Server Trust
 
 **Command Permission**:
 The decision to allow, deny, or ask before one Tool Invocation executes, independent of Hook Handler Trust and of whether the later process is confined.
@@ -209,7 +234,7 @@ The immutable model-visible projection of one MCP Tool Catalog frozen for a Run.
 _Avoid_: MCP Tool Catalog, live Server state
 
 **MCP Mention**:
-An explicit `$name` token that admits one MCP Tool or every Tool from one MCP Server into this Run's MCP Tool Snapshot.
+An explicit `$name` token that admits one MCP Tool or every Tool from one MCP Server into this Run's MCP Tool Snapshot. A short name shared with a Skill resolves to the Skill.
 _Avoid_: auto-exposed MCP Tool, Slash MCP, plugin invocation
 
 **MCP Elicitation**:
@@ -240,12 +265,16 @@ _Avoid_: Agent event, JSON line
 A bounded, sanitized projection of one settled Run's lifecycle and authoritative Tool Observations, suitable for presentation and evaluation without treating assistant claims as proof.
 _Avoid_: transcript summary, log, benchmark score
 
+**Completion Disposition**:
+The versioned print/JSON verdict of one settled Run (`verified`, `partial`, `blocked`, or `unverified`), independent of Run Outcome.
+_Avoid_: Run Outcome, Work Result, assistant "done" claim
+
 **Interrupted Tool Invocation**:
 A journaled Tool Invocation whose execution began but whose outcome was not durably recorded, leaving its external side effects unknown.
 _Avoid_: failed Tool, pending Tool
 
 **Timeline**:
-The ordered interactive presentation of committed Messages, Thinking Blocks, Tool Invocations, and process-local User Shell activity, including transient active state.
+The ordered interactive presentation of committed Messages, Thinking Blocks, Tool Invocations, and process-local User Shell activity, including transient active state. Under an in-progress parent `delegate`, it also projects each child Work Item's objective, executionMode, live state, current Tool, and terminal Work Result, attributed to that child's identity.
 _Avoid_: Session, transcript, event log
 
 **Transcript View**:

@@ -3,8 +3,14 @@
 Status: implemented
 
 Current package behavior is documented in
-[`packages/skills/README.md`](../../packages/skills/README.md); later product
-selection and Run-lease decisions are recorded in the ADRs.
+[`packages/skills/README.md`](../../packages/skills/README.md). Product
+selection, Run-lease ownership, user-controlled Skill safety, and slash-only
+catalog hiding are recorded in
+[`ADR-0036`](../../docs/adr/0036-separate-skill-loading-from-product-policy.md),
+[`ADR-0043`](../../docs/adr/0043-extract-instance-local-agent-runtime.md),
+[`ADR-0051`](../../docs/adr/0051-make-skill-safety-user-controlled.md), and
+[`ADR-0058`](../../docs/adr/0058-hide-slash-only-skills-from-the-model-catalog.md).
+The design below is retained as implementation history.
 
 ## Objective
 

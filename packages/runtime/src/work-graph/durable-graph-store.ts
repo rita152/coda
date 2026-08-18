@@ -4,6 +4,7 @@ import type {
 	WorkspaceLedger,
 	WorkspaceLedgerAcceptance,
 	WorkspaceLedgerRestore,
+	WorkspaceOrderReservation,
 	WorkspacePersistence,
 	WorkspacePersistenceLease,
 	WorkspaceSessionOwner,
@@ -92,12 +93,27 @@ export class DurableGraphStore<TGraph extends DurableGraphProjection> {
 		this.#nextPublicationOrder = value;
 	}
 
-	allocateGraphOrder(): number {
-		return this.#nextGraphOrder++;
-	}
-
-	allocatePublicationOrder(): number {
-		return this.#nextPublicationOrder++;
+	async reserveOrders(graphCount: number, publicationCount: number): Promise<WorkspaceOrderReservation> {
+		const ledger = this.#ledger;
+		if (!ledger) throw new Error("Workspace Ledger is not open");
+		if (graphCount === 0 && publicationCount === 0) {
+			return {
+				graphOrderStart: this.#nextGraphOrder,
+				publicationOrderStart: this.#nextPublicationOrder,
+				nextGraphOrder: this.#nextGraphOrder,
+				nextPublicationOrder: this.#nextPublicationOrder,
+			};
+		}
+		if (this.#ledgerFailure) throw this.#ledgerFailure;
+		try {
+			const reservation = await ledger.reserveOrders({ graphCount, publicationCount });
+			this.#nextGraphOrder = Math.max(this.#nextGraphOrder, reservation.nextGraphOrder);
+			this.#nextPublicationOrder = Math.max(this.#nextPublicationOrder, reservation.nextPublicationOrder);
+			return reservation;
+		} catch (error) {
+			this.latchLedgerFailure(error);
+			throw error;
+		}
 	}
 
 	async initialize(): Promise<WorkspaceLedgerRestore> {

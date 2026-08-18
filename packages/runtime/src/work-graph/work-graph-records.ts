@@ -107,7 +107,7 @@ export interface ItemRecord {
 	readonly dependencies: readonly WorkItemId[];
 	readonly objective: string;
 	readonly executionMode: "read_only" | "write";
-	readonly publicationOrder: number;
+	publicationOrder: number;
 	readonly runtimeId: string;
 	readonly projection: ItemProjection;
 	readonly process: ItemRuntimeState;
@@ -115,7 +115,7 @@ export interface ItemRecord {
 
 export interface GraphRecord {
 	readonly id: WorkGraphId;
-	readonly order: number;
+	order: number;
 	readonly objective: string;
 	readonly rootId: WorkItemId;
 	readonly maximumConcurrency: number;

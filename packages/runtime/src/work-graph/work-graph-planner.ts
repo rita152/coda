@@ -128,8 +128,6 @@ export function createWorkGraphPlanningView(graphs: ReadonlyMap<WorkGraphId, Gra
 
 export interface WorkGraphPlanningDurability {
 	graphFailure(graphId: WorkGraphId): unknown;
-	allocateGraphOrder(): number;
-	allocatePublicationOrder(): number;
 }
 
 export function planBatch(input: {
@@ -256,7 +254,7 @@ export function planBatch(input: {
 				}
 				const graph: GraphRecord = {
 					id,
-					order: durable.allocateGraphOrder(),
+					order: 0,
 					objective,
 					rootId,
 					maximumConcurrency: command.maximumConcurrency,
@@ -277,7 +275,7 @@ export function planBatch(input: {
 					executionMode: command.root.executionMode,
 					configuration: command.configuration,
 					acceptedAt: now,
-					publicationOrder: durable.allocatePublicationOrder(),
+					publicationOrder: 0,
 					runtimeId: `worker:${id}:${rootId}:${identity.generate("queue_item")}`,
 				});
 				view.graphs.set(id, graph);
@@ -309,7 +307,6 @@ export function planBatch(input: {
 						now,
 						newItems,
 						itemIds,
-						durable,
 						identity,
 					});
 				}
@@ -422,7 +419,6 @@ function planAddedItem(input: {
 	readonly now: number;
 	readonly newItems: NewItemPlan[];
 	readonly itemIds: WorkItemId[];
-	readonly durable: WorkGraphPlanningDurability;
 	readonly identity: Identity;
 }): void {
 	const { graph, specification, commandIndex, items } = input;
@@ -503,7 +499,7 @@ function planAddedItem(input: {
 		executionMode: specification.executionMode,
 		configuration,
 		acceptedAt: input.now,
-		publicationOrder: input.durable.allocatePublicationOrder(),
+		publicationOrder: 0,
 		runtimeId: `worker:${graph.id}:${id}:${input.identity.generate("queue_item")}`,
 	});
 	items.set(id, item);

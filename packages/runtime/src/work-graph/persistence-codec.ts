@@ -130,6 +130,7 @@ export function decodeWorkspaceLedger(source: string): WorkspaceLedgerRestore {
 		return {
 			graphId: identity(entry.graphId, "Work Graph") as WorkspaceGraphIndexEntry["graphId"],
 			order: nonNegativeInteger(entry.order, "Work Graph order"),
+			...(entry.ownerEpoch === undefined ? {} : { ownerEpoch: identity(entry.ownerEpoch, "Workspace epoch") }),
 		};
 	});
 	const sessionOwners = value.sessionOwners.map((entry) => {

@@ -4,7 +4,8 @@ Status: implemented
 
 Current operation is documented in
 [`packages/evals/README.md`](../../packages/evals/README.md). Campaign artifacts
-and later harness-reliability changes remain separate historical evidence.
+and later harness-reliability changes remain separate historical evidence. The
+design below is retained as implementation history.
 
 ## Goal
 

@@ -262,13 +262,18 @@ export class WorkGraphEngine implements CodingAgent {
 					capacity: this.#capacity,
 					durable: {
 						graphFailure: (graphId) => this.#durable.graphFailure(graphId),
-						allocateGraphOrder: () => this.#durable.allocateGraphOrder(),
-						allocatePublicationOrder: () => this.#durable.allocatePublicationOrder(),
 					},
 					view: createWorkGraphPlanningView(this.#graphs),
 				}),
 			);
 			await validatePlanConfigurations(plan, this.#options.modelProvider);
+			const orderReservation = await this.#durable.reserveOrders(plan.newGraphs.length, plan.newItems.length);
+			for (const [index, graph] of plan.newGraphs.entries()) {
+				graph.order = orderReservation.graphOrderStart + index;
+			}
+			for (const [index, entry] of plan.newItems.entries()) {
+				entry.item.publicationOrder = orderReservation.publicationOrderStart + index;
+			}
 			await reserveBatch(plan, {
 				placement: this.#options.placement,
 				sessions: this.#options.sessions,

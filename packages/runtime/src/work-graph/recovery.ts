@@ -147,6 +147,17 @@ export class WorkGraphRecovery {
 			...this.#options.graphOrder.flatMap((graph) => graph.itemOrder.map((item) => item.publicationOrder + 1)),
 		);
 		await this.#reconcileWorkspaceSessionOwners(ledgerRestore);
+		if (
+			this.#options.durable.nextGraphOrder > ledgerRestore.nextGraphOrder ||
+			this.#options.durable.nextPublicationOrder > ledgerRestore.nextPublicationOrder
+		) {
+			await this.#options.durable.accept({
+				activeGraphs: [],
+				nextGraphOrder: this.#options.durable.nextGraphOrder,
+				nextPublicationOrder: this.#options.durable.nextPublicationOrder,
+				sessionOwners: [],
+			});
+		}
 
 		const uncertainPublicationTargets = new Set<string>();
 		for (const graph of this.#options.graphOrder) {

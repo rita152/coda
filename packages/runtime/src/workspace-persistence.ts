@@ -16,6 +16,7 @@ export type {
 	WorkspaceLedger,
 	WorkspaceLedgerAcceptance,
 	WorkspaceLedgerRestore,
+	WorkspaceOrderReservation,
 	WorkspacePersistence,
 	WorkspacePersistenceLease,
 	WorkspaceSessionOwner,

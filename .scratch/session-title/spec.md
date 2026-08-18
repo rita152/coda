@@ -4,9 +4,9 @@ Status: implemented
 
 # Session Titles
 
-`/session` shows a model-generated Session Title instead of the first Prompt.
-
 Historical implementation record. Current behavior is defined by `docs/adr/0054-generate-durable-session-titles.md`, Session v11 in `docs/adr/0024-version-the-linear-session-records.md`, and the `coding-agent.sessions` capability.
+
+`/session` shows a model-generated Session Title instead of the first Prompt.
 
 ## Requirements
 
