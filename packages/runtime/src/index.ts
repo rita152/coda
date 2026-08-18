@@ -59,6 +59,7 @@ export type {
 	ConfigureWorkItem,
 	DeliverWorkItemInput,
 	DesiredRuntimeConfiguration,
+	DesiredRuntimeConfigurationPatch,
 	ObservationOptions,
 	PublicationOutcome,
 	StartWorkGraph,

@@ -335,13 +335,17 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "MCP Host",
 		summary:
-			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.",
+			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, mention-gated Run admission, progress, cancellation, subscriptions, and form or URL Elicitation.",
 		sources: [
 			"packages/mcp/src/host.ts",
 			"packages/coding-agent/src/mcp/registry.ts",
 			"packages/coding-agent/src/mcp/run-capability.ts",
 		],
-		tests: ["packages/mcp/test/host.test.ts", "packages/coding-agent/test/mcp/application.test.ts"],
+		tests: [
+			"packages/mcp/test/host.test.ts",
+			"packages/coding-agent/test/mcp/application.test.ts",
+			"packages/coding-agent/test/app/run-mentions.test.ts",
+		],
 	}),
 	capability({
 		id: "coding-agent.credential-storage",
@@ -402,9 +406,10 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Agent Skills",
 		summary:
-			"Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs.",
+			"Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, immutable per-Run catalogs that hide slash-only Skills, and both automatic skill Tool loading and explicit `$` injection.",
 		sources: [
 			"packages/skills/src/loader.ts",
+			"packages/coding-agent/src/skills/invocation.ts",
 			"packages/coding-agent/src/skills/manager.ts",
 			"packages/coding-agent/src/skills/run-capability.ts",
 		],
@@ -412,6 +417,9 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/skills/test/loader.test.ts",
 			"packages/coding-agent/test/skills-cli.test.ts",
 			"packages/coding-agent/test/skills/inventory.test.ts",
+			"packages/coding-agent/test/skills/invocation.test.ts",
+			"packages/coding-agent/test/application-print.test.ts",
+			"packages/coding-agent/test/commands/mentions.test.ts",
 		],
 	}),
 	capability({
@@ -420,7 +428,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Terminal experience",
 		summary:
-			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill mention, and Workspace-scoped `@` file mention completion, plus background Session activity.",
+			"Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill and MCP mentions, and Workspace-scoped `@` file mention completion, plus background Session activity.",
 		sources: [
 			"packages/tui/src/tui.ts",
 			"packages/coding-agent/src/ui/run-interactive.ts",

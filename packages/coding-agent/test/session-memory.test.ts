@@ -90,7 +90,7 @@ describe("Session facade", () => {
 		];
 		await session.record({
 			type: "composer_submission_recorded",
-			submission: { id: "submission:refs", kind: "prompt", text: "Use /review then /search", references },
+			submission: { id: "submission:refs", kind: "prompt", text: "Use $review then $search", references },
 		});
 		const sessionId = session.descriptor.id;
 		await session.close();
@@ -101,7 +101,7 @@ describe("Session facade", () => {
 			resumeId: sessionId,
 		});
 		expect(restored.composerSubmissions).toEqual([
-			{ id: "submission:refs", kind: "prompt", text: "Use /review then /search", references },
+			{ id: "submission:refs", kind: "prompt", text: "Use $review then $search", references },
 		]);
 		await restored.close();
 	});

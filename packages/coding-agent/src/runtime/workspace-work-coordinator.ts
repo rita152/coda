@@ -381,6 +381,7 @@ export function createWorkspaceWorkCoordinator(options: {
 				if (signal.aborted) throw signal.reason ?? new DOMException("MCP acquisition aborted", "AbortError");
 				return options.mcpRegistry.acquireTools();
 			},
+			selectedToolIds: () => options.mcpRegistry?.selectedToolIds() ?? new Set(),
 			elicit: async (request) => {
 				const owner = sessionByRun.get(String(request.execution.runId));
 				return (owner ? elicitationBySession.get(owner) : undefined)?.(request) ?? { action: "decline" };

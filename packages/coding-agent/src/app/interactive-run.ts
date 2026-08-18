@@ -12,6 +12,7 @@ import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import type { Workspace } from "../host/workspace.ts";
 import { createWorkspaceFileSearch } from "../host/workspace-file-search.ts";
+import type { CodingMcpRegistry } from "../mcp/registry.ts";
 import type { McpAgentElicitation } from "../mcp/run-capability.ts";
 import type { MediaLibrary } from "../media/media-library.ts";
 import type { ModelCapabilityResolver } from "../models/model-capabilities.ts";
@@ -91,6 +92,7 @@ export interface RunInteractiveApplicationInput {
 	readonly coordinator: WorkspaceWorkCoordinator;
 	readonly skillsManager: CodingSkillsManager;
 	readonly skillsSnapshot: CodingSkillsSnapshot;
+	readonly mcpRegistry?: CodingMcpRegistry;
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
 	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
@@ -215,6 +217,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 				reasoning: targetReasoning,
 				skillsManager: input.skillsManager,
 				skillsSnapshot: input.skillsSnapshot,
+				...(input.mcpRegistry ? { mcpRegistry: input.mcpRegistry } : {}),
 				inputResources: input.inputResources,
 				options: input.options,
 				workspace: input.workspace.root,
@@ -248,6 +251,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 		permissionsCommand: input.permissionsCommand,
 		skillsManager: input.skillsManager,
 		skillsSnapshot: input.skillsSnapshot,
+		...(input.mcpRegistry ? { mcpRegistry: input.mcpRegistry } : {}),
 		inputResources: input.inputResources,
 		options: input.options,
 		workspace: input.workspace.root,

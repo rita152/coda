@@ -1,6 +1,8 @@
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import type { McpToolDescriptor } from "@coda/mcp";
 import { DEFAULT_SKILL_LIMITS, validateAgentSkill } from "@coda/skills";
 import { sanitizeTerminalText } from "@coda/tui";
+import { mcpToolsForCommandId } from "../commands/mcp-extensions.ts";
 import { skillIdFromCommandId } from "../commands/skill-extensions.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { FileSystem } from "../host/file-system.ts";
@@ -160,18 +162,26 @@ export async function validateSkillPath(
 	return result.valid ? 0 : 1;
 }
 
-export function assertSkillReferencesAvailable(
+export function assertExtensionReferencesAvailable(
 	snapshot: CodingSkillsSnapshot,
+	mcpTools: readonly McpToolDescriptor[],
 	references: readonly ComposerExtensionReference[],
 ): void {
 	for (const reference of references) {
-		if (reference.source !== "skill") {
-			throw new Error(`Extension reference loading is unavailable for source: ${reference.source}`);
+		if (reference.source === "skill") {
+			const id = skillIdFromCommandId(reference.commandId);
+			const resolved = id ? snapshot.byId.get(id) : undefined;
+			if (!resolved) {
+				throw new Error(`Selected Skill is no longer available: ${reference.name}`);
+			}
+			continue;
 		}
-		const id = skillIdFromCommandId(reference.commandId);
-		const resolved = id ? snapshot.byId.get(id) : undefined;
-		if (!resolved) {
-			throw new Error(`Selected Skill is no longer available: ${reference.name}`);
+		if (reference.source === "mcp") {
+			if (mcpToolsForCommandId(reference.commandId, mcpTools).length === 0) {
+				throw new Error(`Selected MCP Tool is no longer available: ${reference.name}`);
+			}
+			continue;
 		}
+		throw new Error(`Extension reference loading is unavailable for source: ${reference.source}`);
 	}
 }

@@ -78,6 +78,129 @@ describe("CodingSkills discovery and precedence", () => {
 		expect("set" in snapshot.byId).toBe(false);
 	});
 
+	it("hides slash-only Skills from the model catalog and keeps them in the palette", async () => {
+		const value = await fixture();
+		const root = join(value.workspace, ".agents", "skills");
+		await writeSkill(root, "codebase-design", "codebase-design", "Shared vocabulary for designing deep modules");
+		await mkdir(join(root, "improve-codebase-architecture", "agents"), { recursive: true });
+		await writeFile(
+			join(root, "improve-codebase-architecture", "SKILL.md"),
+			[
+				"---",
+				"name: improve-codebase-architecture",
+				"description: Scan a codebase for deepening opportunities",
+				"disable-model-invocation: true",
+				"---",
+				"",
+				"Grill architecture improvements.",
+				"",
+			].join("\n"),
+		);
+		await writeFile(
+			join(root, "improve-codebase-architecture", "agents", "openai.yaml"),
+			"policy:\n  allow_implicit_invocation: false\n",
+		);
+		const manager = new CodingSkillsManager({ fileSystem: value.fileSystem, roots: value.roots });
+		const snapshot = await manager.refresh();
+		const source = createSkillsCapabilitySource(manager);
+		const lease = await source.acquire({
+			model: {
+				id: "skills-test",
+				name: "Skills test",
+				api: "test",
+				provider: "test",
+				baseUrl: "http://localhost.invalid",
+				reasoning: false,
+				input: ["text" as const],
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			},
+			signal: new AbortController().signal,
+		});
+		try {
+			expect(snapshot.resolved.map(({ candidate }) => candidate.metadata.name).sort()).toEqual([
+				"codebase-design",
+				"improve-codebase-architecture",
+			]);
+			expect(
+				skillExtensionEntries(snapshot)
+					.map(({ name }) => name)
+					.sort(),
+			).toEqual(["codebase-design", "improve-codebase-architecture"]);
+			expect(lease.promptFragments[0]?.text).toContain("- codebase-design:");
+			expect(lease.promptFragments[0]?.text).not.toContain("improve-codebase-architecture");
+			expect(lease.tools[0]?.tool.name).toBe("skill");
+		} finally {
+			await lease.dispose();
+		}
+	});
+
+	it("hides Skills whose Codex sidecar disables implicit invocation", async () => {
+		const value = await fixture();
+		const root = join(value.home, ".agents", "skills", "slash-only");
+		await mkdir(join(root, "agents"), { recursive: true });
+		await writeFile(
+			join(root, "SKILL.md"),
+			"---\nname: slash-only\ndescription: Only the user should start this\n---\n\nStay slash-only.\n",
+		);
+		await writeFile(join(root, "agents", "openai.yaml"), "policy:\n  allow_implicit_invocation: false\n");
+		const manager = new CodingSkillsManager({ fileSystem: value.fileSystem, roots: value.roots });
+		const source = createSkillsCapabilitySource(manager);
+		const lease = await source.acquire({
+			model: {
+				id: "skills-test",
+				name: "Skills test",
+				api: "test",
+				provider: "test",
+				baseUrl: "http://localhost.invalid",
+				reasoning: false,
+				input: ["text" as const],
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			},
+			signal: new AbortController().signal,
+		});
+		try {
+			expect(manager.current?.resolved[0]?.implicitInvocation).toBe(false);
+			expect(lease.promptFragments).toEqual([]);
+			expect(lease.tools).toEqual([]);
+		} finally {
+			await lease.dispose();
+		}
+	});
+
+	it("catalogs trigger rules and a name-or-id skill Tool", async () => {
+		const value = await fixture();
+		await writeSkill(join(value.home, ".agents", "skills"), "inspect", "inspect", "Inspect the current change");
+		const manager = new CodingSkillsManager({ fileSystem: value.fileSystem, roots: value.roots });
+		const source = createSkillsCapabilitySource(manager);
+		const lease = await source.acquire({
+			model: {
+				id: "skills-test",
+				name: "Skills test",
+				api: "test",
+				provider: "test",
+				baseUrl: "http://localhost.invalid",
+				reasoning: false,
+				input: ["text" as const],
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			},
+			signal: new AbortController().signal,
+		});
+		try {
+			expect(lease.promptFragments[0]?.text).toContain("<skills_instructions>");
+			expect(lease.promptFragments[0]?.text).toContain("### Available skills");
+			expect(lease.promptFragments[0]?.text).toContain("### How to use skills");
+			expect(lease.promptFragments[0]?.text).toContain("If you skip an obvious Skill, say why");
+			expect(lease.promptFragments[0]?.text).toContain("(file:");
+			expect(lease.promptFragments[0]?.text).toContain("inspect");
+			expect(lease.tools[0]?.tool.name).toBe("skill");
+		} finally {
+			await lease.dispose();
+		}
+	});
+
 	it("keeps discovery diagnostics when a scan limit is reached without a trust gate", async () => {
 		const value = await fixture();
 		const root = join(value.workspace, ".agents", "skills");

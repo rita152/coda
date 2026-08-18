@@ -18,6 +18,7 @@ export class CodingMcpRegistry {
 	readonly #reconnectDelaysMs: readonly number[];
 	readonly #reconnect = new Map<string, ReconnectState>();
 	readonly #detach: () => void;
+	#selectedToolIds: ReadonlySet<string> = new Set();
 	#closed = false;
 
 	constructor(options: {
@@ -61,6 +62,16 @@ export class CodingMcpRegistry {
 	acquireTools(): McpToolLease {
 		this.#assertOpen();
 		return this.#host.acquireTools();
+	}
+
+	/** Replaces the MCP Tools admitted into the next Run. Empty means none. */
+	selectTools(ids: readonly string[]): void {
+		this.#assertOpen();
+		this.#selectedToolIds = new Set(ids);
+	}
+
+	selectedToolIds(): ReadonlySet<string> {
+		return this.#selectedToolIds;
 	}
 
 	onDidChange(listener: (snapshot: McpHostSnapshot) => void): () => void {

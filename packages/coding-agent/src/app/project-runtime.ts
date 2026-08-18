@@ -3,6 +3,7 @@ import type { Api, AuthResult, Model, MutableModels, ThinkingLevel } from "@coda
 import { createMcpHost, type McpConnector } from "@coda/mcp";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
+import { McpCommandRegistryBinding } from "../commands/mcp-extensions.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import { SkillCommandRegistryBinding } from "../commands/skill-extensions.ts";
 import type { HookRuntimeSnapshot } from "../hooks/types.ts";
@@ -169,11 +170,15 @@ export async function openProjectServices(input: {
 	let mcpConfiguration = input.mcpConfiguration;
 	let mcpRegistry: CodingMcpRegistry | undefined;
 	let skillRegistryBinding: SkillCommandRegistryBinding | undefined;
+	let mcpRegistryBinding: McpCommandRegistryBinding | undefined;
+	let detachMcpCatalog: (() => void) | undefined;
 	let skillWatcher: ReturnType<SkillWatcherFactory["watch"]> | undefined;
 	let skillUiClosed = false;
 	const closeUi = () => {
 		skillUiClosed = true;
 		skillWatcher?.dispose();
+		detachMcpCatalog?.();
+		mcpRegistryBinding?.dispose();
 		skillRegistryBinding?.dispose();
 	};
 	try {
@@ -198,6 +203,13 @@ export async function openProjectServices(input: {
 		const commandRegistry = input.options.commandRegistry ?? createCoreCommandRegistry();
 		skillRegistryBinding = new SkillCommandRegistryBinding(commandRegistry);
 		skillRegistryBinding.sync(input.skills.snapshot);
+		mcpRegistryBinding = new McpCommandRegistryBinding(commandRegistry);
+		if (mcpRegistry) {
+			mcpRegistryBinding.sync(mcpRegistry.snapshot());
+			detachMcpCatalog = mcpRegistry.onDidChange((snapshot) => {
+				if (!skillUiClosed) mcpRegistryBinding!.sync(snapshot);
+			});
+		}
 		if (input.interactive && input.options.skillWatcher) {
 			skillWatcher = input.options.skillWatcher.watch(
 				input.skills.roots.map(({ path }) => path),
@@ -251,6 +263,7 @@ export async function openProjectServices(input: {
 				return mcpCommandSnapshot();
 			}
 			await mcpRegistry.reload(mcpConfiguration.definitions);
+			mcpRegistryBinding?.sync(mcpRegistry.snapshot());
 			return mcpCommandSnapshot();
 		};
 		return {

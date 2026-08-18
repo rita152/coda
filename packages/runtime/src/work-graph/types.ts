@@ -34,6 +34,13 @@ export interface DesiredRuntimeConfiguration {
 	readonly runLimits?: RunLimits;
 }
 
+/** Child Work Item fields layered onto the parent Desired Runtime Configuration. */
+export interface DesiredRuntimeConfigurationPatch {
+	readonly model?: DesiredRuntimeConfiguration["model"];
+	readonly reasoning?: DesiredRuntimeConfiguration["reasoning"];
+	readonly runLimits?: RunLimits;
+}
+
 export type WorkSessionTarget =
 	| { readonly type: "create"; readonly sessionId?: string }
 	| { readonly type: "resume"; readonly sessionId: string };
@@ -58,7 +65,7 @@ export interface AddWorkItemSpecification {
 	readonly dependencies?: readonly (WorkItemId | string)[];
 	readonly objective: string;
 	readonly executionMode: WorkExecutionMode;
-	readonly configuration?: DesiredRuntimeConfiguration;
+	readonly configuration?: DesiredRuntimeConfigurationPatch;
 }
 
 export interface AddWorkItems {

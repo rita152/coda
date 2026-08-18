@@ -22,15 +22,17 @@ const RunLimitsSchema = Type.Object(
 
 const ConfigurationSchema = Type.Object(
 	{
-		model: Type.Object(
-			{
-				provider: Type.String({ minLength: 1, maxLength: 256 }),
-				id: Type.String({ minLength: 1, maxLength: 256 }),
-			},
-			{ additionalProperties: false },
+		model: Type.Optional(
+			Type.Object(
+				{
+					provider: Type.String({ minLength: 1, maxLength: 256 }),
+					id: Type.String({ minLength: 1, maxLength: 256 }),
+				},
+				{ additionalProperties: false },
+			),
 		),
-		reasoning: Type.Union(
-			["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((value) => Type.Literal(value)),
+		reasoning: Type.Optional(
+			Type.Union(["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((value) => Type.Literal(value))),
 		),
 		runLimits: Type.Optional(RunLimitsSchema),
 	},
@@ -66,8 +68,8 @@ export interface DelegateChildSpecification {
 	readonly executionMode: WorkExecutionMode;
 	readonly dependencies?: readonly string[];
 	readonly configuration?: {
-		readonly model: { readonly provider: string; readonly id: string };
-		readonly reasoning: ThinkingLevel | "off";
+		readonly model?: { readonly provider: string; readonly id: string };
+		readonly reasoning?: ThinkingLevel | "off";
 		readonly runLimits?: RunLimits;
 	};
 }
@@ -122,7 +124,7 @@ export function createDelegateTool(options: {
 	const tool: AgentTool<typeof DelegateParameters, DelegateToolDetails> = {
 		name: "delegate",
 		description:
-			"Add a bounded batch of child Work Items under this Work Item, wait for their structured results, and continue. Graph, Runtime, and Session identities are bound by the coordinator and cannot be supplied.",
+			"Add a bounded batch of child Work Items under this Work Item, wait for their structured results, and continue. Omit configuration, or omit configuration.model, to inherit this Work Item's model. If a requested model is unavailable, children inherit this Work Item's model instead of failing. Graph, Runtime, and Session identities are bound by the coordinator and cannot be supplied.",
 		parameters: DelegateParameters,
 		replaySafety: "never",
 		parallelSafe: false,

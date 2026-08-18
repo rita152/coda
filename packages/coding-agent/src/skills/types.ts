@@ -4,6 +4,7 @@ import type {
 	SkillDiagnostic,
 	SkillId,
 	SkillRevision,
+	SkillRoot,
 	SkillsSnapshot,
 } from "@coda/skills";
 
@@ -23,6 +24,7 @@ export interface ResolvedCodingSkill {
 	readonly collisionCount: number;
 	readonly sourceLabel: string;
 	readonly qualifiedName: string;
+	readonly implicitInvocation: boolean;
 }
 
 export interface CodingSkillDiagnostic {
@@ -35,6 +37,7 @@ export interface CodingSkillDiagnostic {
 
 export interface CodingSkillsSnapshot {
 	readonly loader: SkillsSnapshot<CodingSkillOrigin>;
+	readonly roots: readonly SkillRoot<CodingSkillOrigin>[];
 	readonly candidates: readonly SkillCandidate<CodingSkillOrigin>[];
 	readonly resolved: readonly ResolvedCodingSkill[];
 	readonly byId: ReadonlyMap<SkillId, ResolvedCodingSkill>;

@@ -128,7 +128,7 @@ describe("CommandComposer", () => {
 		editor.setText("Use $rev");
 		const composer = new CommandComposer(registry, editor);
 		composer.handleInput(key("enter"));
-		editor.handleInput({ type: "text", text: "then /sea" });
+		editor.handleInput({ type: "text", text: "then $sea" });
 		composer.handleInput(key("enter"));
 
 		expect(composer.extensionReferences.map(({ commandId, start, end }) => ({ commandId, start, end }))).toEqual([

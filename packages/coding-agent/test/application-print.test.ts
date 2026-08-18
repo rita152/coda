@@ -783,15 +783,16 @@ describe("Coding Agent print mode", () => {
 				"---\nname: inspect\ndescription: Inspect the current change\n---\n\nFollow the inspection checklist.\n",
 			);
 			const faux = fauxProvider({ runtime: testTimeRuntime(245) });
-			let selectedSkillId = "";
 			faux.setResponses([
 				(context) => {
-					expect(context.systemPrompt).toContain("Available Skills (metadata only)");
+					expect(context.systemPrompt).toContain("<skills_instructions>");
+					expect(context.systemPrompt).toContain("### Available skills");
+					expect(context.systemPrompt).toContain("### How to use skills");
 					expect(context.systemPrompt).toContain("Inspect the current change");
-					selectedSkillId = JSON.stringify(context.tools).match(/skill:[a-f0-9]{32}/u)?.[0] ?? "";
-					expect(selectedSkillId).not.toBe("");
+					expect(context.systemPrompt).toContain("(file:");
+					expect(context.tools?.some(({ name }) => name === "skill")).toBe(true);
 					return fauxAssistantMessage(
-						fauxToolCall("skill", { skill: selectedSkillId, arguments: "focus here" }, { id: "skill-call" }),
+						fauxToolCall("skill", { skill: "inspect", arguments: "focus here" }, { id: "skill-call" }),
 						{ stopReason: "toolUse", timestamp: 245 },
 					);
 				},
@@ -824,6 +825,65 @@ describe("Coding Agent print mode", () => {
 
 			await expect(
 				application.run(["--print", "--model", `${faux.getModel().provider}/${faux.getModel().id}`, "inspect"]),
+			).resolves.toBe(0);
+			expect(stdout.value).toBe("inspection complete\n");
+			expect(stderr.value).toBe("");
+		} finally {
+			await rm(fixture, { recursive: true, force: true });
+		}
+	});
+
+	it("injects a `$` Skill mention without requiring the skill Tool", async () => {
+		const fixture = await mkdtemp(join(tmpdir(), "coda-print-skill-mention-"));
+		try {
+			const workspace = join(fixture, "workspace");
+			const home = join(fixture, "home");
+			const skillDirectory = join(home, ".agents", "skills", "inspect");
+			await Promise.all([mkdir(workspace, { recursive: true }), mkdir(skillDirectory, { recursive: true })]);
+			await writeFile(
+				join(skillDirectory, "SKILL.md"),
+				"---\nname: inspect\ndescription: Inspect the current change\n---\n\nFollow the inspection checklist.\n",
+			);
+			const faux = fauxProvider({ runtime: testTimeRuntime(247) });
+			faux.setResponses([
+				(context) => {
+					const messages = JSON.stringify(context.messages);
+					expect(messages).toContain("BEGIN USER-SELECTED SKILL CONTEXT");
+					expect(messages).toContain("Follow the inspection checklist");
+					expect(messages).toContain("do the work");
+					expect(messages).not.toContain("$inspect");
+					expect(context.tools?.some(({ name }) => name === "skill")).toBe(true);
+					return fauxAssistantMessage("inspection complete", { timestamp: 247 });
+				},
+			]);
+			const models = createModels({ runtime: testTimeRuntime(247) });
+			models.setProvider(faux.provider);
+			const stdout = new BufferOutput();
+			const stderr = new BufferOutput();
+			let id = 0;
+			const application = createCodingAgentApplication({
+				models,
+				settings,
+				fileSystem: createNodeFileSystem(),
+				processRunner: createNodeProcessRunner({ platform: "darwin" }),
+				io: { stdin: { isTTY: false, readAll: async () => "" }, stdout, stderr },
+				runtime: {
+					cwd: workspace,
+					homeDirectory: home,
+					platform: "darwin",
+					environment: {},
+					clock: { now: () => 247 },
+					idGenerator: { generate: (kind) => `${kind}:${++id}` },
+				},
+			});
+
+			await expect(
+				application.run([
+					"--print",
+					"--model",
+					`${faux.getModel().provider}/${faux.getModel().id}`,
+					"$inspect do the work",
+				]),
 			).resolves.toBe(0);
 			expect(stdout.value).toBe("inspection complete\n");
 			expect(stderr.value).toBe("");
