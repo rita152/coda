@@ -144,24 +144,20 @@ async function runLive(apiKey: string, prompt: string): Promise<LiveResult> {
 }
 
 async function runArchitectureLive(apiKey: string): Promise<LiveResult> {
-	return runPrompt(
-		apiKey,
-		ARCHITECTURE_PROMPT,
-		async ({ workspace }) => {
-			const skillsRoot = join(workspace, ".agents", "skills");
-			await mkdir(join(workspace, ".agents"), { recursive: true });
-			await cp(REPO_SKILLS, skillsRoot, { recursive: true });
-			await mkdir(join(workspace, "src"), { recursive: true });
-			await writeFile(
-				join(workspace, "src", "billing.ts"),
-				'export function charge(amount: number): string {\n\treturn "charged " + amount;\n}\n',
-			);
-			await writeFile(
-				join(workspace, "src", "app.ts"),
-				'import { charge } from "./billing.ts";\n\nexport function run(): string {\n\treturn charge(10);\n}\n',
-			);
-		},
-	);
+	return runPrompt(apiKey, ARCHITECTURE_PROMPT, async ({ workspace }) => {
+		const skillsRoot = join(workspace, ".agents", "skills");
+		await mkdir(join(workspace, ".agents"), { recursive: true });
+		await cp(REPO_SKILLS, skillsRoot, { recursive: true });
+		await mkdir(join(workspace, "src"), { recursive: true });
+		await writeFile(
+			join(workspace, "src", "billing.ts"),
+			'export function charge(amount: number): string {\n\treturn "charged " + amount;\n}\n',
+		);
+		await writeFile(
+			join(workspace, "src", "app.ts"),
+			'import { charge } from "./billing.ts";\n\nexport function run(): string {\n\treturn charge(10);\n}\n',
+		);
+	});
 }
 
 async function runPrompt(

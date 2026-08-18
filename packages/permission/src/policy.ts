@@ -1,5 +1,6 @@
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 import { isDangerousCommand, isKnownSafeCommand, shellCommandForToolInput } from "./command-safety.ts";
+import { sandboxPermissionRequestReason } from "./sandbox-permissions.ts";
 import {
 	type ApprovalPolicy,
 	type CommandPermissionDecision,
@@ -64,7 +65,12 @@ function summarize(request: CommandPermissionRequest): string {
 }
 
 export function commandPermissionPrompt(request: CommandPermissionRequest): string {
-	return `Allow ${request.toolName}?\n${summarize(request)}`;
+	const prompt = `Allow ${request.toolName}?\n${summarize(request)}`;
+	const justification = request.toolInput.justification;
+	if (typeof justification === "string" && justification.length > 0) {
+		return `${prompt}\n${justification}`;
+	}
+	return prompt;
 }
 
 function applies(record: RememberedCommandPermission, request: CommandPermissionRequest, key: string): boolean {
@@ -152,6 +158,8 @@ function assessExec(
 	filesystemAccess: FilesystemAccess,
 	filesystemEnforced: boolean,
 ): CommandPermissionDecision {
+	const invalid = sandboxPermissionRequestReason(request.toolInput, approvalPolicy);
+	if (invalid) return { kind: "deny", reason: invalid };
 	const command = shellCommandForToolInput(request.toolInput);
 	const knownSafe = command !== undefined && isKnownSafeCommand(command);
 	const dangerous = command !== undefined && isDangerousCommand(command);

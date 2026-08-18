@@ -215,4 +215,87 @@ describe("Command Permission policy", () => {
 			}),
 		).toBe(true);
 	});
+
+	it("rejects Codex with_additional_permissions unless on-request and additional_permissions are present", () => {
+		const extra = {
+			command: "curl example.test",
+			sandbox_permissions: "with_additional_permissions",
+			additional_permissions: { network: { enabled: true } },
+		};
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", extra),
+			),
+		).toEqual({
+			kind: "ask",
+			prompt: "Allow bash?\ncurl example.test",
+		});
+		expect(createCommandPermissionPolicy({ approvalPolicy: "never" }).decide(request("bash", extra))).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is Never; reject command — you cannot request additional permissions unless the approval policy is OnRequest",
+		});
+		expect(createCommandPermissionPolicy({ approvalPolicy: "untrusted" }).decide(request("bash", extra))).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is UnlessTrusted; reject command — you cannot request additional permissions unless the approval policy is OnRequest",
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", { command: "curl example.test", sandbox_permissions: "with_additional_permissions" }),
+			),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"missing `additional_permissions`; provide at least one of `network` or `file_system` when using `with_additional_permissions`",
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", {
+					command: "curl example.test",
+					sandbox_permissions: "with_additional_permissions",
+					additional_permissions: {},
+				}),
+			),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"`additional_permissions` must include at least one requested permission in `network` or `file_system`",
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", {
+					command: "curl example.test",
+					additional_permissions: { network: { enabled: true } },
+				}),
+			),
+		).toEqual({
+			kind: "deny",
+			reason: "`additional_permissions` requires `sandbox_permissions` set to `with_additional_permissions`",
+		});
+	});
+
+	it("rejects justification without sandbox_permissions and includes it on require_escalated prompts", () => {
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", { command: "ls", justification: "Allow this command" }),
+			),
+		).toEqual({
+			kind: "deny",
+			reason:
+				'`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.',
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", {
+					command: "curl example.test",
+					sandbox_permissions: "require_escalated",
+					justification: "needs network",
+				}),
+			),
+		).toEqual({
+			kind: "ask",
+			prompt: "Allow bash?\ncurl example.test\nneeds network",
+		});
+	});
 });

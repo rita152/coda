@@ -21,6 +21,28 @@ const BashParameters = Type.Object(
 		command: Type.String({ minLength: 1 }),
 		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 5_400_000 })),
 		sandbox_permissions: SandboxPermissions,
+		justification: Type.Optional(Type.String()),
+		additional_permissions: Type.Optional(
+			Type.Object(
+				{
+					network: Type.Optional(
+						Type.Object({ enabled: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+					),
+					file_system: Type.Optional(
+						Type.Object(
+							{
+								read: Type.Optional(Type.Array(Type.String())),
+								write: Type.Optional(Type.Array(Type.String())),
+								entries: Type.Optional(Type.Array(Type.Unknown())),
+								glob_scan_max_depth: Type.Optional(Type.Integer({ minimum: 1 })),
+							},
+							{ additionalProperties: false },
+						),
+					),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		preview: Type.Optional(
 			Type.Object(
 				{
@@ -84,7 +106,7 @@ export function createBashTool(options: {
 	return {
 		name: "bash",
 		description:
-			"Run one non-interactive Shell command directly on the host. Pipelines use pipefail with an explicitly supported Bash or Zsh dialect; unsupported dialects reject pipelines. Use preview for bounded display without changing exit status. sandbox_permissions defaults to use_default; require_escalated runs unsandboxed after Command Permission allows it.",
+			"Run one non-interactive Shell command directly on the host. Pipelines use pipefail with an explicitly supported Bash or Zsh dialect; unsupported dialects reject pipelines. Use preview for bounded display without changing exit status. sandbox_permissions defaults to use_default; require_escalated runs unsandboxed after Command Permission allows it; with_additional_permissions asks under on-request and requires additional_permissions.",
 		parameters: BashParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context): Promise<ToolExecutionOutput> => {

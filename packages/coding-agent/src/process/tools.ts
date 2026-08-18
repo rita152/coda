@@ -45,6 +45,28 @@ const ProcessParameters = Type.Object(
 				Type.Literal("with_additional_permissions"),
 			]),
 		),
+		justification: Type.Optional(Type.String()),
+		additional_permissions: Type.Optional(
+			Type.Object(
+				{
+					network: Type.Optional(
+						Type.Object({ enabled: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+					),
+					file_system: Type.Optional(
+						Type.Object(
+							{
+								read: Type.Optional(Type.Array(Type.String())),
+								write: Type.Optional(Type.Array(Type.String())),
+								entries: Type.Optional(Type.Array(Type.Unknown())),
+								glob_scan_max_depth: Type.Optional(Type.Integer({ minimum: 1 })),
+							},
+							{ additionalProperties: false },
+						),
+					),
+				},
+				{ additionalProperties: false },
+			),
+		),
 	},
 	{ additionalProperties: false },
 );

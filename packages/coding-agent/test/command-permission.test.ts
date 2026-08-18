@@ -117,6 +117,29 @@ describe("PermissionLifecycleHookHost", () => {
 		).resolves.toEqual({ continue: false, reason: "stay confined" });
 	});
 
+	it("rejects with_additional_permissions when additional_permissions are missing", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({
+				approvalPolicy: "on-request",
+				filesystemAccess: "restricted",
+			}),
+			ask: async () => ({ action: "allow" }),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "widen",
+				toolInput: { command: "curl example.test", sandbox_permissions: "with_additional_permissions" },
+			}),
+		).resolves.toEqual({
+			continue: false,
+			reason:
+				"missing `additional_permissions`; provide at least one of `network` or `file_system` when using `with_additional_permissions`",
+		});
+	});
+
 	it("resolves a hook permissionAsk through the ask port", async () => {
 		const host = new PermissionLifecycleHookHost({
 			inner: inner({ continue: true, permissionAsk: true, reason: "hook asked" }),
