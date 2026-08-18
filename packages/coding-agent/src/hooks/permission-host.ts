@@ -1,9 +1,10 @@
 import type { AgentInput } from "@coda/agent";
-import type {
-	CommandPermissionAskAnswer,
-	CommandPermissionPolicy,
-	CommandPermissionRequest,
-	RememberedCommandPermission,
+import {
+	type CommandPermissionAskAnswer,
+	type CommandPermissionPolicy,
+	type CommandPermissionRequest,
+	type RememberedCommandPermission,
+	requestsSandboxOverride,
 } from "@coda/permission";
 import type {
 	HookContinueOutcome,
@@ -38,6 +39,7 @@ function permissionRequest(
 		toolInput: context.toolInput,
 		sessionId: context.sessionId,
 		workspace: context.cwd,
+		...(requestsSandboxOverride(context.toolInput) ? { sandboxOverride: true } : {}),
 	};
 }
 
@@ -99,7 +101,13 @@ export class PermissionLifecycleHookHost implements LifecycleHookHost {
 				additionalContext: inner.additionalContext,
 			};
 		}
-		if (!this.#ask) return withoutAsk(inner);
+		if (!this.#ask) {
+			return {
+				continue: false,
+				reason: "Command Permission requires an interactive Session",
+				additionalContext: inner.additionalContext,
+			};
+		}
 		const answer = await this.#ask({ ...request, prompt: decision.prompt });
 		if (answer.remember) {
 			const record =

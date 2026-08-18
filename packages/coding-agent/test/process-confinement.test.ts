@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolExecutionContext } from "@coda/agent";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import type { ProcessRunRequest } from "../src/host/process-runner.ts";
@@ -80,6 +80,63 @@ describe("Bash Process Confinement", () => {
 		);
 		expect(output.content).toBe("ok");
 		expect(runs).toEqual([{ executable: "/usr/bin/srt", args: ["/bin/zsh", "-c", "npm test"] }]);
+	});
+
+	it("skips Process Confinement when sandbox_permissions is require_escalated", async () => {
+		const runs: Array<{ readonly executable: string; readonly args: readonly string[] }> = [];
+		const wrapScript = vi.fn(async () => ({
+			executable: "/usr/bin/srt",
+			args: ["/bin/zsh", "-c", "curl example.test"],
+			environment: { PATH: "/usr/bin" },
+		}));
+		const tool = createBashTool({
+			workspace: {
+				root: "/workspace",
+				resolvePath: async (requestedPath) => ({
+					requestedPath,
+					lexicalPath: requestedPath,
+					canonicalPath: requestedPath,
+					exists: true,
+					insideWorkspace: true,
+				}),
+			},
+			fileSystem: {
+				readFile: async () => new Uint8Array(),
+			} as never,
+			processRunner: {
+				run: async (request) => {
+					runs.push({ executable: request.executable, args: request.args });
+					return {
+						exitCode: 0,
+						signal: null,
+						stdout: "ok",
+						stderr: "",
+						timedOut: false,
+						truncated: false,
+					};
+				},
+			},
+			shellExecutable: "/bin/zsh",
+			runtime: {
+				homeDirectory: "/home",
+				environment: { PATH: "/usr/bin", HOME: "/home" },
+			},
+			wrapScript,
+		});
+
+		await tool.execute(
+			{ command: "curl example.test", sandbox_permissions: "require_escalated" },
+			{
+				runId: "run-1" as ToolExecutionContext["runId"],
+				turnId: "turn-1" as ToolExecutionContext["turnId"],
+				invocationId: "inv-1" as ToolExecutionContext["invocationId"],
+				resultMessageId: "msg-1" as ToolExecutionContext["resultMessageId"],
+				providerToolCallId: "call-1",
+				signal: new AbortController().signal,
+			},
+		);
+		expect(wrapScript).not.toHaveBeenCalled();
+		expect(runs[0]?.executable).toBe("/bin/zsh");
 	});
 });
 

@@ -80,6 +80,43 @@ describe("PermissionLifecycleHookHost", () => {
 		await expect(remembered.preToolUse(request)).resolves.toEqual({ continue: true });
 	});
 
+	it("denies an ask when no interactive ask port is available", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({ approvalPolicy: "untrusted" }),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "headless",
+				toolInput: { command: "npm test" },
+			}),
+		).resolves.toEqual({
+			continue: false,
+			reason: "Command Permission requires an interactive Session",
+		});
+	});
+
+	it("asks for Codex require_escalated sandbox_permissions under on-request", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({
+				approvalPolicy: "on-request",
+				filesystemAccess: "restricted",
+			}),
+			ask: async () => ({ action: "deny", reason: "stay confined" }),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "escalate",
+				toolInput: { command: "curl example.test", sandbox_permissions: "require_escalated" },
+			}),
+		).resolves.toEqual({ continue: false, reason: "stay confined" });
+	});
+
 	it("resolves a hook permissionAsk through the ask port", async () => {
 		const host = new PermissionLifecycleHookHost({
 			inner: inner({ continue: true, permissionAsk: true, reason: "hook asked" }),

@@ -9,7 +9,6 @@ import {
 	replaceProcessConfinement,
 	resolveApprovalPolicy,
 	resolveSandboxMode,
-	settingsAfterPermissionPreset,
 } from "../src/app/approval-sandbox.ts";
 import { PERMISSION_PRESETS } from "../src/commands/permissions-flow.ts";
 
@@ -22,6 +21,9 @@ describe("approval and sandbox resolution", () => {
 		expect(resolveApprovalPolicy({ cli: "untrusted", settings: { approvalPolicy: "never" } })).toBe("untrusted");
 		expect(resolveApprovalPolicy({ noPermission: true })).toBe("never");
 		expect(resolveApprovalPolicy({ bypassApprovalsAndSandbox: true, cli: "untrusted" })).toBe("never");
+		expect(resolveApprovalPolicy({ interactive: false })).toBe("never");
+		expect(resolveApprovalPolicy({ interactive: false, settings: { approvalPolicy: "untrusted" } })).toBe("never");
+		expect(resolveApprovalPolicy({ interactive: false, cli: "untrusted" })).toBe("untrusted");
 
 		expect(resolveSandboxMode({})).toBe("danger-full-access");
 		expect(resolveSandboxMode({ settings: { enabled: true } })).toBe("workspace-write");
@@ -36,8 +38,27 @@ describe("approval and sandbox resolution", () => {
 			approvalPolicy: "on-request",
 			filesystemAccess: "restricted",
 			writableRoots: ["/workspace", "/tmp"],
-			denyWrite: ["/workspace/.git", "/workspace/.agents", "/workspace/.coda"],
+			denyWrite: [
+				"/workspace/.git",
+				"/workspace/.agents",
+				"/workspace/.coda",
+				"/workspace/.codex",
+				"/tmp/.git",
+				"/tmp/.agents",
+				"/tmp/.coda",
+				"/tmp/.codex",
+			],
+			filesystemEnforced: true,
 			remembered: [],
+		});
+		expect(
+			commandPermissionOptionsFor("on-request", "workspace-write", "/workspace", [], {
+				tmpdir: "/var/folders/t",
+				filesystemEnforced: false,
+			}),
+		).toMatchObject({
+			writableRoots: ["/workspace", "/tmp", "/var/folders/t"],
+			filesystemEnforced: false,
 		});
 		expect(commandPermissionOptionsFor("never", "danger-full-access", "/workspace", [])).toMatchObject({
 			filesystemAccess: "unrestricted",
@@ -61,10 +82,6 @@ describe("approval and sandbox resolution", () => {
 		const auto = PERMISSION_PRESETS.find((preset) => preset.id === "auto")!;
 		applyPermissionPreset(policy, auto, "/workspace");
 		expect(policy.decide(write)).toEqual({ kind: "allow" });
-		expect(settingsAfterPermissionPreset({}, auto)).toEqual({
-			permission: { approvalPolicy: "on-request" },
-			sandbox: { mode: "workspace-write" },
-		});
 
 		const engine: ProcessConfinementEngine = {
 			initialize: vi.fn(async () => undefined),
@@ -117,26 +134,19 @@ describe("approval and sandbox resolution", () => {
 		).resolves.toBeUndefined();
 	});
 
-	it("persists the selected preset and can reopen Process Confinement", async () => {
+	it("applies a Codex preset to the current Session without persisting user settings", async () => {
 		const policy = createCommandPermissionPolicy({ approvalPolicy: "on-request" });
-		const persist = vi.fn(async () => undefined);
 		const replaceConfinement = vi.fn(async () => undefined);
 		const sandboxMode = { current: "danger-full-access" as const };
 		const command = createPermissionsCommand({
 			policy,
 			workspace: "/workspace",
 			sandboxMode,
-			settings: () => ({}),
-			persist,
 			replaceConfinement,
 		});
 		const fullAccess = PERMISSION_PRESETS.find((preset) => preset.id === "full-access")!;
 		await command.apply(fullAccess);
 		expect(command.snapshot()).toEqual({ approvalPolicy: "never", sandboxMode: "danger-full-access" });
-		expect(persist).toHaveBeenCalledWith({
-			permission: { approvalPolicy: "never" },
-			sandbox: { mode: "danger-full-access" },
-		});
 		expect(replaceConfinement).toHaveBeenCalledWith("danger-full-access");
 	});
 });

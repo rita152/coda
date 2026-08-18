@@ -7,7 +7,9 @@ Callers supply an Approval Policy (`untrusted`, `on-request`, or `never`),
 optional filesystem bounds, and remembered decisions. The policy returns
 `allow`, `deny`, or `ask` using Codex's unmatched-command and write-safety
 rules: untrusted auto-allows known-safe read-only Shell; on-request asks only
-for dangerous commands, sandbox overrides, or writes outside writable roots;
-never never asks and denies those same escalations. Remembered decisions are
-keyed by Tool name and canonical input, and workspace-scoped records do not
-apply to another Workspace.
+for dangerous commands, `sandbox_permissions` overrides, or writes outside
+writable roots; never never asks and denies those same escalations. Double-quoted
+expansions are not known-safe. Restricted writes and non-known-safe Shell
+auto-allow only while Process Confinement is actually enforcing the boundary.
+Remembered decisions are keyed by Tool name and canonical input, and
+workspace-scoped records do not apply to another Workspace.

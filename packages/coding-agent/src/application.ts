@@ -11,6 +11,7 @@ import {
 } from "@coda/sandbox";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
 import {
+	absoluteTmpdir,
 	commandPermissionOptionsFor,
 	createLiveWrapScript,
 	createPermissionsCommand,
@@ -391,6 +392,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						noPermission: parsed.noPermission,
 						bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
 						settings: settings.permission,
+						interactive: parsed.mode === "interactive",
 					});
 					const sandboxModeState = {
 						current: resolveSandboxMode({
@@ -401,6 +403,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}),
 					};
 					const sandboxMode = sandboxModeState.current;
+					const tmpdir = absoluteTmpdir(options.runtime.environment);
 					const settingsState = createApplicationSettingsState(settings);
 					const persistSettings = async (next: typeof settings): Promise<void> => {
 						settings = next;
@@ -431,6 +434,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									record.scope === "user" ||
 									(record.scope === "workspace" && record.workspace === workspace.root),
 							),
+							{ tmpdir, filesystemEnforced: !processConfinementActive(sandboxMode) },
 						),
 					);
 					const lifecycleHooks = new PermissionLifecycleHookHost({
@@ -440,12 +444,10 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							options.commandPermissionAsk ??
 							(interactivePermission
 								? (request) => interactivePermission.request(request)
-								: parsed.strictPermissions
-									? async () => ({
-											action: "deny",
-											reason: "Command Permission requires an interactive Session",
-										})
-									: undefined),
+								: async () => ({
+										action: "deny",
+										reason: "Command Permission requires an interactive Session",
+									})),
 						onRemember: async (record) => {
 							if (record.scope !== "user" && record.scope !== "workspace") return;
 							const retained = (settings.permission?.remembered ?? []).filter(
@@ -479,6 +481,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									...(settings.sandbox?.deniedDomains
 										? { deniedDomains: settings.sandbox.deniedDomains }
 										: {}),
+									...(tmpdir ? { tmpdir } : {}),
 								},
 								engine: createAnthropicSandboxEngine(),
 							});
@@ -490,17 +493,29 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						}
 					}
 					if (confinementHolder.current) workspaceResources.useProcessConfinement(confinementHolder.current);
+					permissionPolicy.configure({
+						filesystemEnforced:
+							!processConfinementActive(sandboxModeState.current) ||
+							confinementHolder.current !== undefined ||
+							options.wrapScript !== undefined,
+					});
 					const wrapScript = options.wrapScript ?? createLiveWrapScript(confinementHolder);
 					const sessionOptions = {
 						...options,
 						wrapScript,
 					};
+					const permissionBounds = () => ({
+						tmpdir,
+						filesystemEnforced:
+							!processConfinementActive(sandboxModeState.current) ||
+							confinementHolder.current !== undefined ||
+							options.wrapScript !== undefined,
+					});
 					const permissionsCommand = createPermissionsCommand({
 						policy: permissionPolicy,
 						workspace: workspace.root,
 						sandboxMode: sandboxModeState,
-						settings: () => settings,
-						persist: persistSettings,
+						bounds: permissionBounds,
 						...(ownsConfinement
 							? {
 									replaceConfinement: async (mode) => {
@@ -518,6 +533,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 												...(settings.sandbox?.deniedDomains
 													? { deniedDomains: settings.sandbox.deniedDomains }
 													: {}),
+												...(tmpdir ? { tmpdir } : {}),
 											});
 										} catch (error) {
 											await maintenanceDiagnostics({

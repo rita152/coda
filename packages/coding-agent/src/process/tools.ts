@@ -39,6 +39,13 @@ const ProcessParameters = Type.Object(
 				description: "For action=write, close stdin after writing.",
 			}),
 		),
+		sandbox_permissions: Type.Optional(
+			Type.Union([
+				Type.Literal("use_default"),
+				Type.Literal("require_escalated"),
+				Type.Literal("with_additional_permissions"),
+			]),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -118,7 +125,13 @@ export function createProcessTool(options: {
 		execute: async (arguments_, context): Promise<ToolExecutionOutput> => {
 			switch (arguments_.action) {
 				case "start":
-					return startProcess(options, arguments_.command, arguments_.timeoutMs, context);
+					return startProcess(
+						options,
+						arguments_.command,
+						arguments_.timeoutMs,
+						arguments_.sandbox_permissions,
+						context,
+					);
 				case "poll": {
 					const processId = requiredProcessId("poll", arguments_.processId);
 					if (typeof processId !== "string") return processId;
@@ -177,6 +190,7 @@ async function startProcess(
 	},
 	command: string | undefined,
 	timeoutMs: number | undefined,
+	sandboxPermissions: "use_default" | "require_escalated" | "with_additional_permissions" | undefined,
 	context: Parameters<AgentTool["execute"]>[1],
 ): Promise<ToolExecutionOutput> {
 	if (typeof command !== "string" || command.length === 0) {
@@ -184,15 +198,16 @@ async function startProcess(
 	}
 	const environment = hostProcessEnvironment(options.runtime);
 	try {
-		const confined = options.wrapScript
-			? await options.wrapScript({
-					command,
-					shell: options.shellExecutable,
-					cwd: options.workspace.root,
-					environment,
-					commandId: String(context.invocationId),
-				})
-			: undefined;
+		const confined =
+			options.wrapScript && sandboxPermissions !== "require_escalated"
+				? await options.wrapScript({
+						command,
+						shell: options.shellExecutable,
+						cwd: options.workspace.root,
+						environment,
+						commandId: String(context.invocationId),
+					})
+				: undefined;
 		const spawn = confined ?? {
 			executable: options.shellExecutable,
 			args: ["-c", command] as const,

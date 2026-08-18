@@ -458,7 +458,7 @@ Workspace:
       --ask-for-approval, -a     Command Permission: untrusted|on-request|never
       --approval-mode            Alias for --ask-for-approval
       --no-permission            Alias for --ask-for-approval never
-      --strict-permissions       Deny unresolved Command Permission asks in print mode
+      --strict-permissions       Deny unresolved Command Permission asks when not interactive
       --yolo                     Never ask and disable Process Confinement
       --dangerously-bypass-approvals-and-sandbox
                                  Alias for --yolo

@@ -18,5 +18,6 @@ export type {
 	FilesystemAccess,
 	PermissionRememberScope,
 	RememberedCommandPermission,
+	SandboxPermission,
 } from "./types.ts";
-export { APPROVAL_POLICIES, FILESYSTEM_ACCESS } from "./types.ts";
+export { APPROVAL_POLICIES, FILESYSTEM_ACCESS, requestsSandboxOverride } from "./types.ts";

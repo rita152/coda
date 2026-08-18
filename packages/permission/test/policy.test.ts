@@ -3,6 +3,7 @@ import {
 	commandPermissionKey,
 	createCommandPermissionPolicy,
 	NEVER_PROMPT_REASON,
+	requestsSandboxOverride,
 	WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
 	WRITE_REJECTED_READ_ONLY_REASON,
 } from "../src/index.ts";
@@ -57,7 +58,9 @@ describe("Command Permission policy", () => {
 			kind: "ask",
 			prompt: "Allow bash?\nrm -rf /tmp/example",
 		});
-		expect(restricted.decide(request("bash", { command: "curl example.test" }, { sandboxOverride: true }))).toEqual({
+		expect(
+			restricted.decide(request("bash", { command: "curl example.test", sandbox_permissions: "require_escalated" })),
+		).toEqual({
 			kind: "ask",
 			prompt: "Allow bash?\ncurl example.test",
 		});
@@ -150,5 +153,66 @@ describe("Command Permission policy", () => {
 		const bash = request("bash", { command: "curl evil.test" });
 		policy.remember(bash, { kind: "deny", reason: "blocked by user", remember: "user" });
 		expect(policy.decide(bash)).toEqual({ kind: "deny", reason: "blocked by user" });
+	});
+
+	it("treats quoted forced rm as dangerous instead of known-safe", () => {
+		const quoted = request("bash", { command: 'echo "$(rm -rf /tmp/example)"' });
+		expect(createCommandPermissionPolicy({ approvalPolicy: "untrusted" }).decide(quoted)).toEqual({
+			kind: "ask",
+			prompt: 'Allow bash?\necho "$(rm -rf /tmp/example)"',
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "unrestricted" }).decide(
+				quoted,
+			),
+		).toEqual({
+			kind: "ask",
+			prompt: 'Allow bash?\necho "$(rm -rf /tmp/example)"',
+		});
+		expect(createCommandPermissionPolicy({ approvalPolicy: "never" }).decide(quoted)).toEqual({
+			kind: "deny",
+			reason: NEVER_PROMPT_REASON,
+		});
+	});
+
+	it("asks or denies in-workspace writes when restricted filesystem is not enforced", () => {
+		const write = request("write", { path: "src/app.ts" });
+		const onRequest = createCommandPermissionPolicy({
+			approvalPolicy: "on-request",
+			filesystemAccess: "restricted",
+			writableRoots: [workspace],
+			filesystemEnforced: false,
+		});
+		expect(onRequest.decide(write)).toEqual({ kind: "ask", prompt: "Allow write?\nsrc/app.ts" });
+		const never = createCommandPermissionPolicy({
+			approvalPolicy: "never",
+			filesystemAccess: "restricted",
+			writableRoots: [workspace],
+			filesystemEnforced: false,
+		});
+		expect(never.decide(write)).toEqual({ kind: "deny", reason: WRITE_REJECTED_OUTSIDE_PROJECT_REASON });
+		expect(onRequest.decide(request("bash", { command: "npm test" }))).toEqual({
+			kind: "ask",
+			prompt: "Allow bash?\nnpm test",
+		});
+		expect(never.decide(request("bash", { command: "npm test" }))).toEqual({
+			kind: "deny",
+			reason: NEVER_PROMPT_REASON,
+		});
+		expect(onRequest.decide(request("bash", { command: "ls" }))).toEqual({ kind: "allow" });
+	});
+
+	it("maps Codex sandbox_permissions wire names onto sandboxOverride", () => {
+		expect(requestsSandboxOverride({ command: "curl example.test" })).toBe(false);
+		expect(requestsSandboxOverride({ command: "curl example.test", sandbox_permissions: "use_default" })).toBe(false);
+		expect(requestsSandboxOverride({ command: "curl example.test", sandbox_permissions: "require_escalated" })).toBe(
+			true,
+		);
+		expect(
+			requestsSandboxOverride({
+				command: "curl example.test",
+				sandbox_permissions: "with_additional_permissions",
+			}),
+		).toBe(true);
 	});
 });

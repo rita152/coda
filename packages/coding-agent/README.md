@@ -176,8 +176,9 @@ Command Permission hangs on `PreToolUse` and can resolve a hook
 `permissionDecision:ask` before the runtime sees the outcome. Approval Policy
 is `untrusted`, `on-request`, or `never` (`--ask-for-approval`). `/permissions`
 changes that policy together with Process Confinement Mode for the current
-Session. Print mode bypasses unresolved asks unless `--strict-permissions` is
-set.
+Session. Print mode defaults Approval Policy to `never` and denies unresolved
+asks, matching Codex exec. `--strict-permissions` keeps that deny path when
+`--ask-for-approval` is set in print mode.
 `PermissionRequest`, `SubagentStart`, and `SubagentStop` remain recognized
 configuration events but are not executed.
 
@@ -325,7 +326,7 @@ This status block is generated from executable runtime contracts. See the
 - **Agent runtime** (@coda/agent) — In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, and opt-in whole-Turn retry.
 - **Model access** (@coda/ai) — OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh. Custom Provider protocols: `openai.chatcompletions`, `openai.responses`, and `anthropic.messages`.
 - **Built-in Tools** (@coda/coding-agent) — Workspace-relative and absolute-path reading, search, atomic single-file create-or-replace and exact-text edit, direct host Shell execution, and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and `process`.
-- **Command Permission** (@coda/permission) — A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session.
+- **Command Permission** (@coda/permission) — A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session. Print mode defaults to never and denies unresolved asks.
 - **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.

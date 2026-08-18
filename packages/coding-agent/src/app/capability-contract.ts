@@ -227,7 +227,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Command Permission",
 		summary:
-			"A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session.",
+			"A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session. Print mode defaults to never and denies unresolved asks.",
 		sources: [
 			"packages/permission/src/policy.ts",
 			"packages/coding-agent/src/hooks/permission-host.ts",

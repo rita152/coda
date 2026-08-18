@@ -31,6 +31,13 @@ describe("known-safe commands", () => {
 		expect(isKnownSafeCommand(argv("bash", "-lc", "ls > out.txt"))).toBe(false);
 		expect(isKnownSafeCommand(argv("cargo", "check"))).toBe(false);
 	});
+
+	it("rejects double-quoted expansions the way Codex tree-sitter does", () => {
+		expect(isKnownSafeCommand(argv("bash", "-lc", 'echo "$HOME"'))).toBe(false);
+		expect(isKnownSafeCommand(argv("bash", "-lc", 'echo "$(pwd)"'))).toBe(false);
+		expect(isKnownSafeCommand(argv("bash", "-lc", 'echo "$(rm -rf /tmp/example)"'))).toBe(false);
+		expect(isKnownSafeCommand(argv("bash", "-lc", "echo hello"))).toBe(true);
+	});
 });
 
 describe("dangerous commands", () => {
@@ -47,5 +54,12 @@ describe("dangerous commands", () => {
 		expect(isDangerousCommand(argv("bash", "-lc", "trap 'rm -rf /tmp/example' EXIT"))).toBe(true);
 		expect(isDangerousCommand(argv("rm", "-r", "/tmp/example"))).toBe(false);
 		expect(isDangerousCommand(argv("bash", "-lc", "echo 'rm -rf /tmp/example'"))).toBe(false);
+	});
+
+	it("flags forced rm inside quoted substitutions, case arms, braces, and functions", () => {
+		expect(isDangerousCommand(argv("bash", "-lc", 'echo "$(rm -rf /tmp/example)"'))).toBe(true);
+		expect(isDangerousCommand(argv("bash", "-lc", "case x in x) rm -f /tmp/x;; esac"))).toBe(true);
+		expect(isDangerousCommand(argv("bash", "-lc", "{ rm -f /tmp/x; }"))).toBe(true);
+		expect(isDangerousCommand(argv("bash", "-lc", "function f(){ rm -f /tmp/x; }"))).toBe(true);
 	});
 });

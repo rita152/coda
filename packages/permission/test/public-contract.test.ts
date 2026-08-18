@@ -15,6 +15,7 @@ describe("@coda/permission public contract", () => {
 			"createCommandPermissionPolicy",
 			"isDangerousCommand",
 			"isKnownSafeCommand",
+			"requestsSandboxOverride",
 		]);
 	});
 

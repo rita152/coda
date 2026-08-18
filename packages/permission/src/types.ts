@@ -4,6 +4,14 @@ export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
 export const FILESYSTEM_ACCESS = ["restricted", "unrestricted"] as const;
 export type FilesystemAccess = (typeof FILESYSTEM_ACCESS)[number];
 
+export const SANDBOX_PERMISSIONS = ["use_default", "require_escalated", "with_additional_permissions"] as const;
+export type SandboxPermission = (typeof SANDBOX_PERMISSIONS)[number];
+
+export function requestsSandboxOverride(toolInput: Readonly<Record<string, unknown>>): boolean {
+	const value = toolInput.sandbox_permissions ?? toolInput.sandboxPermissions;
+	return value === "require_escalated" || value === "with_additional_permissions";
+}
+
 export type PermissionRememberScope = "session" | "workspace" | "user";
 
 export interface CommandPermissionRequest {
@@ -32,6 +40,7 @@ export interface CommandPermissionPolicyOptions {
 	readonly filesystemAccess?: FilesystemAccess;
 	readonly writableRoots?: readonly string[];
 	readonly denyWrite?: readonly string[];
+	readonly filesystemEnforced?: boolean;
 	readonly remembered?: readonly RememberedCommandPermission[];
 }
 
@@ -46,6 +55,7 @@ export interface CommandPermissionPolicySnapshot {
 	readonly filesystemAccess: FilesystemAccess;
 	readonly writableRoots: readonly string[];
 	readonly denyWrite: readonly string[];
+	readonly filesystemEnforced: boolean;
 }
 
 export interface CommandPermissionPolicy {

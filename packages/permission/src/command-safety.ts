@@ -67,7 +67,10 @@ const SHELL_KEYWORDS = new Set([
 	"case",
 	"esac",
 	"in",
+	"function",
 ]);
+
+const COMMAND_PREFIX_SKIP = new Set([...SHELL_KEYWORDS, "{", "}"]);
 
 function executableName(raw: string): string | undefined {
 	const name = basename(raw);
@@ -253,6 +256,7 @@ function tokenizeShell(script: string): Token[] | undefined {
 			index++;
 			let value = "";
 			while (index < script.length && script[index] !== quote) {
+				if (quote === '"' && (script[index] === "$" || script[index] === "`")) return undefined;
 				if (quote === '"' && script[index] === "\\" && index + 1 < script.length) {
 					value += script[index + 1];
 					index += 2;
@@ -358,10 +362,42 @@ function skipEnvAssignments(command: readonly string[]): readonly string[] {
 	return command.slice(index);
 }
 
+function isCasePattern(word: string): boolean {
+	return /^[A-Za-z0-9_.*@?-]+\)/u.test(word);
+}
+
+function skipCaseArm(words: readonly string[]): readonly string[] {
+	let index = 1;
+	if (index < words.length) index++;
+	if (words[index] === "in") index++;
+	while (index < words.length && !words[index]!.endsWith(")")) index++;
+	if (index < words.length) index++;
+	return words.slice(index);
+}
+
 function skipLeadingKeywords(command: readonly string[]): readonly string[] {
-	let index = 0;
-	while (index < command.length && SHELL_KEYWORDS.has(command[index]!)) index++;
-	return command.slice(index);
+	let words: readonly string[] = command;
+	while (words.length > 0) {
+		const first = words[0]!;
+		if (first === "case") {
+			const next = skipCaseArm(words);
+			if (next.length === words.length) break;
+			words = next;
+			continue;
+		}
+		if (
+			COMMAND_PREFIX_SKIP.has(first) ||
+			first.endsWith("{") ||
+			first.endsWith("()") ||
+			first.endsWith("(){") ||
+			isCasePattern(first)
+		) {
+			words = words.slice(1);
+			continue;
+		}
+		break;
+	}
+	return words;
 }
 
 function extractBalanced(source: string, start: number, open: string, close: string): string | undefined {
@@ -406,16 +442,22 @@ function extractSubstitutions(script: string): string[] {
 	let quote: string | undefined;
 	while (index < script.length) {
 		const char = script[index]!;
-		if (quote) {
-			if (char === "\\" && quote === '"') {
-				index += 2;
-				continue;
-			}
-			if (char === quote) quote = undefined;
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
 			index++;
 			continue;
 		}
-		if (char === "'" || char === '"') {
+		if (quote === '"') {
+			if (char === "\\") {
+				index += 2;
+				continue;
+			}
+			if (char === '"') {
+				quote = undefined;
+				index++;
+				continue;
+			}
+		} else if (char === "'" || char === '"') {
 			quote = char;
 			index++;
 			continue;
@@ -512,7 +554,7 @@ function splitLooseStatements(script: string): string[] {
 			current += char;
 			continue;
 		}
-		if (script.startsWith("&&", index) || script.startsWith("||", index)) {
+		if (script.startsWith("&&", index) || script.startsWith("||", index) || script.startsWith(";;", index)) {
 			if (current.trim().length > 0) statements.push(current);
 			current = "";
 			index++;
