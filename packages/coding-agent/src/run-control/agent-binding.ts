@@ -105,7 +105,7 @@ export function bindAgentRunControl(options: AgentRunControlBindingOptions): Age
 	};
 }
 
-export function wrapUpSteering(trigger: RunControlTrigger, graceDurationMs: number): string {
+function wrapUpSteering(trigger: RunControlTrigger, graceDurationMs: number): string {
 	const reason = trigger === "work_deadline" ? "the work deadline was reached" : "the Run stopped making net progress";
 	const graceSeconds = Math.max(1, Math.floor(graceDurationMs / 1_000));
 	return [
@@ -115,7 +115,7 @@ export function wrapUpSteering(trigger: RunControlTrigger, graceDurationMs: numb
 	].join(" ");
 }
 
-export function progressFactsFromAgentEvent(
+function progressFactsFromAgentEvent(
 	event: Extract<AgentEvent, { type: "tool_execution_end" | "tool_execution_rejected" }>,
 ): readonly RunControlProgressFact[] {
 	const facts: RunControlProgressFact[] = [];
@@ -181,11 +181,11 @@ function nullableDigest(value: unknown): value is string | null {
 	return value === null || (typeof value === "string" && /^[a-f0-9]{64}$/u.test(value));
 }
 
-export function normalizeVerificationCommand(command: string): string {
+function normalizeVerificationCommand(command: string): string {
 	return command.trim().replace(/\s+/gu, " ");
 }
 
-export function isVerificationCommand(command: string): boolean {
+function isVerificationCommand(command: string): boolean {
 	const normalized = normalizeVerificationCommand(command).toLowerCase();
 	return (
 		/(?:^|[;&|()]\s*)(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|check|lint|typecheck)\b/u.test(normalized) ||

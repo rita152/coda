@@ -61,7 +61,7 @@ function containsUnescapedPipelineToken(script: string): boolean {
  * logical OR or a literal quoted pipe as a pipeline. Ambiguous expansions are
  * classified as pipelines so an unsupported dialect fails closed.
  */
-export function containsPotentialPipeline(script: string): boolean {
+function containsPotentialPipeline(script: string): boolean {
 	let atWordStart = true;
 	for (let index = 0; index < script.length; index++) {
 		const character = script[index]!;

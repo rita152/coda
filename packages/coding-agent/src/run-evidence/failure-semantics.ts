@@ -68,7 +68,7 @@ export function commandResolutionKey(command: string): string {
  * Stable normalization used only for exact command identity, never for Shell execution.
  * Internal whitespace remains byte-significant because collapsing it can change quoted Shell input.
  */
-export function normalizeRunEvidenceCommand(command: string): string {
+function normalizeRunEvidenceCommand(command: string): string {
 	return command.replace(/\r\n?/gu, "\n").trim();
 }
 

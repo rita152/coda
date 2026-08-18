@@ -67,7 +67,7 @@ export function resolveObservationSemantics(source: {
 	});
 }
 
-export function readRunEvidenceToolFacts(facts: unknown): RunEvidenceToolFactsV1 | undefined {
+function readRunEvidenceToolFacts(facts: unknown): RunEvidenceToolFactsV1 | undefined {
 	const candidate = record(record(facts)?.runEvidence);
 	if (candidate?.schemaVersion !== RUN_EVIDENCE_TOOL_FACTS_VERSION) return undefined;
 	if (!isCompleteness(candidate.completeness)) return undefined;

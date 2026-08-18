@@ -35,7 +35,7 @@ export interface MutationRequestMetadata {
 
 const MAX_MUTATION_PREVIEW_CHARACTERS = 4_096;
 
-export function isMutationToolName(value: string): value is MutationToolName {
+function isMutationToolName(value: string): value is MutationToolName {
 	return (MUTATION_TOOL_NAMES as readonly string[]).includes(value);
 }
 
