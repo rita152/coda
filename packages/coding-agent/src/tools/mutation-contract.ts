@@ -1,7 +1,6 @@
 import type { JsonValue } from "@coda/ai";
-import { parsePatch } from "./patch/parser.ts";
 
-export const MUTATION_TOOL_NAMES = Object.freeze(["patch", "edit", "write"] as const);
+export const MUTATION_TOOL_NAMES = Object.freeze(["edit", "write"] as const);
 export type MutationToolName = (typeof MUTATION_TOOL_NAMES)[number];
 export type MutationOperation = "add" | "update" | "delete";
 
@@ -46,21 +45,6 @@ export function mutationRequestMetadata(
 	arguments_: Readonly<Record<string, unknown>>,
 ): MutationRequestMetadata | undefined {
 	if (!isMutationToolName(toolName)) return undefined;
-	if (toolName === "patch") {
-		const source = arguments_.patch;
-		if (typeof source !== "string") throw new Error("patch must be a string");
-		const parsed = parsePatch(source);
-		const requestedPaths = Object.freeze(parsed.files.map(({ path }) => path));
-		const count = requestedPaths.length;
-		return Object.freeze({
-			toolName,
-			requestedPaths,
-			preview: boundedPreview(`Patch ${count} file${count === 1 ? "" : "s"}:\n${parsed.source}`),
-			presentVerb: "Patching",
-			pastVerb: "Patched",
-			subject: `${count} file${count === 1 ? "" : "s"}`,
-		});
-	}
 	const path = arguments_.path;
 	if (typeof path !== "string" || path.length === 0) throw new Error(`${toolName} path must be a non-empty string`);
 	if (toolName === "edit") {

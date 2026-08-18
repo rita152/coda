@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type ApplicationOutput, createCodingAgentApplication } from "../src/application.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
 import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
-import { stableCompletionWorkspaceEvidence } from "./completion-test-helpers.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 class BufferOutput implements ApplicationOutput {
@@ -223,82 +222,35 @@ describe("mutation Tools", () => {
 		expect(stderr.value).toContain("coda: completion unverified");
 	});
 
-	it("registers patch before edit/write and applies a structured multi-file mutation", async () => {
-		const workspace = await mkdtemp(join(tmpdir(), "coda-patch-application-"));
+	it("registers edit and write as the only mutation Tools", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-mutation-catalog-"));
 		temporaryDirectories.push(workspace);
-		await writeFile(join(workspace, "existing.txt"), "before\n");
-		await writeFile(join(workspace, "obsolete.txt"), "obsolete\n");
-		const patch = `*** Begin Patch
-*** Update File: existing.txt
--before
-+after
-*** Add File: added.txt
-+added
-*** Delete File: obsolete.txt
-*** End Patch`;
 		const faux = fauxProvider({ runtime: testTimeRuntime(850) });
 		faux.setResponses([
 			(context) => {
 				const names = context.tools?.map(({ name }) => name) ?? [];
-				expect(names.slice(names.indexOf("ls") + 1, names.indexOf("bash"))).toEqual(["patch", "edit", "write"]);
-				expect(context.tools?.find(({ name }) => name === "patch")?.description).toContain(
-					"each file commits atomically",
+				expect(names.slice(names.indexOf("ls") + 1, names.indexOf("bash"))).toEqual(["edit", "write"]);
+				expect(names).not.toContain("patch");
+				expect(names.filter((name) => name.startsWith("process"))).toEqual(["process"]);
+				expect(context.tools?.find(({ name }) => name === "write")?.description).toContain(
+					"Create a UTF-8 text file",
 				);
-				return fauxAssistantMessage(fauxToolCall("patch", { patch }, { id: "provider-patch-1" }), {
-					stopReason: "toolUse",
-					timestamp: 850,
-				});
-			},
-			(context) => {
-				expect(context.messages.at(-1)).toMatchObject({
-					role: "toolResult",
-					toolCallId: "provider-patch-1",
-					toolName: "patch",
-					observation: {
-						status: "ok",
-						facts: {
-							mutation: {
-								atomicity: "per-file",
-								committedPaths: ["existing.txt", "added.txt", "obsolete.txt"],
-							},
-						},
-					},
-				});
-				return fauxAssistantMessage("The patch was applied.", { timestamp: 850 });
-			},
-			(context) => {
-				expect(JSON.stringify(context.messages)).toContain("run a focused verification after the latest mutation");
-				return fauxAssistantMessage(
-					fauxToolCall("bash", { command: "npm test" }, { id: "provider-patch-verification" }),
-					{ stopReason: "toolUse", timestamp: 850 },
+				expect(context.tools?.find(({ name }) => name === "edit")?.description).toContain(
+					"all edits to existing files",
 				);
+				return fauxAssistantMessage("Mutation catalog checked.", { timestamp: 850 });
 			},
-			fauxAssistantMessage("The patch was applied and verified.", { timestamp: 850 }),
 		]);
 		const models = createModels({ runtime: testTimeRuntime(850) });
 		models.setProvider(faux.provider);
 		const stdout = new BufferOutput();
 		const stderr = new BufferOutput();
 		let id = 0;
-		const runner = createNodeProcessRunner({ platform: "darwin" });
 		const application = createCodingAgentApplication({
 			models,
 			settings: { load: async () => ({}), save: async () => undefined },
 			fileSystem: createNodeFileSystem(),
-			processRunner: {
-				run: async (request) =>
-					request.executable === "git"
-						? runner.run(request)
-						: {
-								exitCode: 0,
-								signal: null,
-								stdout: "tests passed",
-								stderr: "",
-								timedOut: false,
-								truncated: false,
-							},
-			},
-			completionWorkspaceEvidence: stableCompletionWorkspaceEvidence(850),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
 			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
 			runtime: {
 				cwd: workspace,
@@ -314,13 +266,10 @@ describe("mutation Tools", () => {
 			"--print",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
-			"apply the patch",
+			"inspect mutation tools",
 		]);
 		expect(exitCode, stderr.value).toBe(0);
-		expect(await readFile(join(workspace, "existing.txt"), "utf8")).toBe("after\n");
-		expect(await readFile(join(workspace, "added.txt"), "utf8")).toBe("added\n");
-		await expect(readFile(join(workspace, "obsolete.txt"))).rejects.toMatchObject({ code: "ENOENT" });
-		expect(stdout.value).toBe("The patch was applied and verified.\n");
+		expect(stdout.value).toBe("Mutation catalog checked.\n");
 		expect(stderr.value).toBe("");
 	});
 

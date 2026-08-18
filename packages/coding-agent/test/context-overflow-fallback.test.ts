@@ -150,10 +150,13 @@ describe("Context Overflow empty-Session fallback", () => {
 			controlled.runner,
 		);
 		fixture.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("process_start", { command: "long-running" }, { id: "start:old" }), {
-				stopReason: "toolUse",
-				timestamp: 10_000,
-			}),
+			fauxAssistantMessage(
+				fauxToolCall("process", { action: "start", command: "long-running" }, { id: "start:old" }),
+				{
+					stopReason: "toolUse",
+					timestamp: 10_000,
+				},
+			),
 			fauxAssistantMessage([], {
 				stopReason: "error",
 				errorMessage: "maximum context window exceeded",
@@ -172,7 +175,7 @@ describe("Context Overflow empty-Session fallback", () => {
 
 		expect(controlled.stopCount()).toBe(1);
 		const oldJournal = await readFile(oldDescriptor!.path!, "utf8");
-		expect(oldJournal).toContain('"toolName":"process_start"');
+		expect(oldJournal).toContain('"toolName":"process"');
 		expect(oldJournal).toContain('"type":"tool_started"');
 		await exit(fixture.terminal);
 		await expect(running).resolves.toBe(0);

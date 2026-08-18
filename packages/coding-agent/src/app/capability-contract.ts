@@ -136,18 +136,17 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Built-in Tools",
 		summary:
-			"Workspace-relative and absolute-path reading, search, atomic single-file and structured multi-file mutation, direct host Shell execution, and recoverable continuation of omitted Tool output.",
+			"Workspace-relative and absolute-path reading, search, atomic single-file create-or-replace and exact-text edit, direct host Shell execution, and recoverable continuation of omitted Tool output.",
 		sources: [
 			"packages/coding-agent/src/tools/index.ts",
 			"packages/coding-agent/src/tools/mutation-contract.ts",
-			"packages/coding-agent/src/tools/patch.ts",
+			"packages/coding-agent/src/process/tools.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/read-tool.test.ts",
 			"packages/coding-agent/test/search-tools.test.ts",
 			"packages/coding-agent/test/mutation-tools.test.ts",
-			"packages/coding-agent/test/patch-parser.test.ts",
-			"packages/coding-agent/test/patch-tool.test.ts",
+			"packages/coding-agent/test/process-tools.test.ts",
 			"packages/coding-agent/test/bash-tool.test.ts",
 		],
 	}),
@@ -174,7 +173,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Long-running process Sessions",
 		summary:
-			"Process-local background Shell Sessions execute directly on the host and support bounded start, poll, stdin, stop, and recoverable omitted output.",
+			"Process-local background Shell Sessions execute directly on the host through one `process` Tool with start, poll, write, and stop actions, plus recoverable omitted output.",
 		sources: [
 			"packages/coding-agent/src/process/process-session-manager.ts",
 			"packages/coding-agent/src/process/tools.ts",

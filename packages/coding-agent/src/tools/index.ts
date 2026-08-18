@@ -6,7 +6,7 @@ import type { ProcessRunner } from "../host/process-runner.ts";
 import type { HostProcessRuntime } from "../host/runtime.ts";
 import type { Workspace } from "../host/workspace.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
-import { createProcessTools } from "../process/tools.ts";
+import { createProcessTool } from "../process/tools.ts";
 import type { SessionHistoryReadPort } from "../session-history/reader.ts";
 import { createAtomicMutationWriter } from "./atomic-mutation-writer.ts";
 import { createBashTool } from "./bash.ts";
@@ -16,7 +16,6 @@ import { createFindTool } from "./find.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
 import type { TargetMutationCoordinator } from "./mutation.ts";
-import { createPatchTool } from "./patch.ts";
 import { createReadTool } from "./read.ts";
 import { createReadSessionHistoryTool } from "./read-session-history.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
@@ -59,11 +58,10 @@ export function createCodingToolContributions(options: {
 			runtime: options.runtime,
 		}),
 		createLsTool(options.workspace, options.fileSystem),
-		createPatchTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createEditTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createWriteTool(options.workspace, options.fileSystem, mutations, mutationWriter),
 		createBashTool(options),
-		...createProcessTools({
+		createProcessTool({
 			workspace: options.workspace,
 			manager: options.processSessionManager,
 			shellExecutable: options.shellExecutable,
@@ -84,43 +82,39 @@ export function createCodingToolContributions(options: {
 		["grep", "read"],
 		["find", "read"],
 		["ls", "read"],
-		["patch", "write"],
 		["edit", "write"],
 		["write", "write"],
 	]);
 	return Object.freeze(
 		tools.map((tool): WorkspaceToolContribution => {
-			const processControl =
-				tool.name === "process_poll" || tool.name === "process_write" || tool.name === "process_stop";
+			if (tool.name !== "process") {
+				return {
+					tool,
+					effect: effects.get(tool.name) ?? "unknown",
+				};
+			}
 			return {
 				tool,
-				effect: effects.get(tool.name) ?? "unknown",
-				...(processControl
-					? {
-							leaseIdentity: (arguments_: unknown) => {
-								if (typeof arguments_ !== "object" || arguments_ === null || !("processId" in arguments_)) {
-									return undefined;
-								}
-								const identity = (arguments_ as { readonly processId?: unknown }).processId;
-								return typeof identity === "string" ? identity : undefined;
-							},
-						}
-					: {}),
-				...(tool.name === "process_start"
-					? {
-							retainLease: (output: ToolExecutionOutput) => {
-								const details = output.details as
-									| { readonly processId?: unknown; readonly state?: unknown }
-									| undefined;
-								return details?.state === "running" && typeof details.processId === "string"
-									? {
-											identity: details.processId,
-											settled: options.processSessionManager.waitForSettlement(details.processId),
-										}
-									: undefined;
-							},
-						}
-					: {}),
+				effect: "unknown",
+				leaseIdentity: (arguments_) => {
+					if (typeof arguments_ !== "object" || arguments_ === null) return undefined;
+					const record = arguments_ as { readonly action?: unknown; readonly processId?: unknown };
+					if (record.action === "start") return undefined;
+					return typeof record.processId === "string" ? record.processId : undefined;
+				},
+				retainLease: (output: ToolExecutionOutput) => {
+					const details = output.details as
+						| { readonly processId?: unknown; readonly state?: unknown; readonly retainLease?: unknown }
+						| undefined;
+					return details?.retainLease === true &&
+						details.state === "running" &&
+						typeof details.processId === "string"
+						? {
+								identity: details.processId,
+								settled: options.processSessionManager.waitForSettlement(details.processId),
+							}
+						: undefined;
+				},
 			};
 		}),
 	);

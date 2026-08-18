@@ -5,7 +5,7 @@ workspace leaf: it does not know Lifecycle Hooks, the TUI, or process execution.
 
 Callers supply an Approval Policy (`untrusted`, `on-request`, or `never`),
 optional filesystem bounds, and remembered decisions. The policy returns
-`allow`, `deny`, or `ask` using Codex's unmatched-command and patch-safety
+`allow`, `deny`, or `ask` using Codex's unmatched-command and write-safety
 rules: untrusted auto-allows known-safe read-only Shell; on-request asks only
 for dangerous commands, sandbox overrides, or writes outside writable roots;
 never never asks and denies those same escalations. Remembered decisions are

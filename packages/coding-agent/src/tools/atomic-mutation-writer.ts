@@ -12,12 +12,6 @@ export interface AtomicMutationRequest {
 	readonly expectedIdentity?: MutationTargetIdentity;
 }
 
-export interface AtomicDeletionRequest {
-	readonly target: string;
-	readonly expectedSha256: string;
-	readonly expectedIdentity?: MutationTargetIdentity;
-}
-
 export interface MutationTargetIdentity {
 	readonly device: string;
 	readonly inode: string;
@@ -29,13 +23,8 @@ export interface AtomicMutationResult {
 	readonly size: number;
 }
 
-export interface AtomicDeletionResult {
-	readonly previousSize: number;
-}
-
 export interface AtomicMutationWriter {
 	write(request: AtomicMutationRequest, context: ToolExecutionContext): Promise<AtomicMutationResult>;
-	delete(request: AtomicDeletionRequest, context: ToolExecutionContext): Promise<AtomicDeletionResult>;
 }
 
 async function optionalStatus(fileSystem: FileSystem, path: string): Promise<FileStatus | undefined> {
@@ -127,29 +116,6 @@ export function createAtomicMutationWriter(fileSystem: FileSystem): AtomicMutati
 					});
 				}
 			}
-		},
-		delete: async (request, context) => {
-			assertTarget(request.target);
-			context.signal.throwIfAborted();
-			const before = await optionalStatus(fileSystem, request.target);
-			if (!before) throw new Error("Mutation target existence changed");
-			await verifyExistingTarget(
-				fileSystem,
-				request.target,
-				before,
-				request.expectedIdentity,
-				request.expectedSha256,
-			);
-			context.signal.throwIfAborted();
-			const current = await optionalStatus(fileSystem, request.target);
-			if (!current || !identityMatches(current, request.expectedIdentity)) {
-				throw new Error("Mutation target identity changed");
-			}
-			if ((await digest(fileSystem, request.target)) !== request.expectedSha256) {
-				throw new Error("Mutation target content changed");
-			}
-			await fileSystem.removeFile(request.target);
-			return { previousSize: before.size };
 		},
 	};
 }

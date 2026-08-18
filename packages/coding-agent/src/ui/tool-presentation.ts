@@ -69,7 +69,7 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 			details = ["(no output)"];
 		}
 		details = truncatePreview(details, detailWidth);
-		if (entry.invocation.toolName !== "edit" && entry.invocation.toolName !== "patch") {
+		if (entry.invocation.toolName !== "edit") {
 			details = details.map((line) => options.theme.style("muted", line));
 		}
 	}
@@ -140,6 +140,8 @@ function actionParts(invocation: ToolActionInvocation, completed: boolean): Tool
 				subject: sanitizeInline(argumentString(arguments_, "command", "(empty command)")),
 				code: true,
 			};
+		case "process":
+			return processActionParts(arguments_, completed);
 		default: {
 			const name = sanitizeInline(toolName);
 			const argumentsSummary = compactArguments(arguments_);
@@ -228,6 +230,10 @@ export function toolActionTitle(invocation: ToolActionInvocation, completed = fa
 		}
 		case "ls":
 			return `${completed ? "Explored" : "Exploring"} ${path}`;
+		case "process": {
+			const parts = processActionParts(arguments_, completed);
+			return `${parts.verb} ${parts.subject}`;
+		}
 		case "bash": {
 			const command = argumentString(arguments_, "command", "(empty command)");
 			return `${completed ? "Ran" : "Running"} ${command}`;
@@ -245,18 +251,6 @@ function renderDetails(entry: TimelineToolEntry, width: number, options: ToolRen
 	const progress = progressDetails(entry, width);
 	if (entry.invocation.toolName === "edit") {
 		return [...progress, ...renderDiff(entry, width, options.theme)];
-	}
-	if (entry.invocation.toolName === "patch") {
-		const committed = details ? arrayField(details, "committedPaths").length : 0;
-		const attempted = details ? arrayField(details, "attemptedPaths").length : 0;
-		const application =
-			attempted > 0
-				? wrapDetail(
-						`${committed}/${attempted} files committed • per-file atomic${committed < attempted ? " • partial application" : ""}`,
-						width,
-					)
-				: [];
-		return [...progress, ...application, ...renderPatchDiff(entry, width, options.theme)];
 	}
 	if (entry.invocation.toolName === "read" && !options.transcript && details) {
 		const start = numberField(details, "startLine");
@@ -374,27 +368,32 @@ function renderDiff(entry: TimelineToolEntry, width: number, theme: TuiTheme): s
 	});
 }
 
-function renderPatchDiff(entry: TimelineToolEntry, width: number, theme: TuiTheme): string[] {
-	const source = argumentText(entry.invocation.arguments, "patch", "");
-	const lines = source.split(/\r?\n/gu).slice(0, 400);
-	return lines.flatMap((line) => {
-		const tone: ThemeTone =
-			line.startsWith("***") || line.startsWith("@@")
-				? "muted"
-				: line.startsWith("+")
-					? "success"
-					: line.startsWith("-")
-						? "error"
-						: "muted";
-		return wrapAnsi(theme.style(tone, line), width);
-	});
-}
-
 function safeMutationMetadata(invocation: ToolActionInvocation) {
 	try {
 		return mutationRequestMetadata(invocation.toolName, invocation.arguments);
 	} catch {
 		return undefined;
+	}
+}
+
+function processActionParts(arguments_: Readonly<Record<string, unknown>>, completed: boolean): ToolActionParts {
+	const action = argumentString(arguments_, "action", "");
+	const processId = argumentString(arguments_, "processId", "");
+	switch (action) {
+		case "start":
+			return {
+				verb: completed ? "Started" : "Starting",
+				subject: sanitizeInline(argumentString(arguments_, "command", "(empty command)")),
+				code: true,
+			};
+		case "poll":
+			return { verb: completed ? "Polled" : "Polling", subject: processId || "process" };
+		case "write":
+			return { verb: completed ? "Wrote to" : "Writing to", subject: processId || "process" };
+		case "stop":
+			return { verb: completed ? "Stopped" : "Stopping", subject: processId || "process" };
+		default:
+			return { verb: completed ? "Called" : "Calling", subject: "process" };
 	}
 }
 
@@ -544,8 +543,4 @@ function numberField(value: Record<string, unknown>, key: string): number | unde
 
 function stringField(value: Record<string, unknown>, key: string): string | undefined {
 	return typeof value[key] === "string" ? sanitizeInline(value[key] as string) : undefined;
-}
-
-function arrayField(value: Record<string, unknown>, key: string): readonly unknown[] {
-	return Array.isArray(value[key]) ? value[key] : [];
 }

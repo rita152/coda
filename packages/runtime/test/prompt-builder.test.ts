@@ -32,7 +32,7 @@ describe("versioned System Prompt Builder", () => {
 		expect(first.text).toContain("BEGIN TRUSTED PROJECT INSTRUCTIONS");
 		expect(first.text).toContain("SHA-256: abc123");
 		expect(first.text).toContain("File Tools resolve relative paths from the Workspace");
-		expect(first.text).toContain("Bash and process_start execute directly on the host as the current user");
+		expect(first.text).toContain("Bash and process execute directly on the host as the current user");
 		expect(first.text).toContain("Turn every stated requirement into an implementation and verification checklist");
 		expect(first.text).toContain("Run the broadest feasible regression suite after the final edit");
 		expect(first.text).toContain("Do not claim a check passed unless you actually ran it successfully");

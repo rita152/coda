@@ -42,7 +42,7 @@ export function createEditTool(
 	return {
 		name: "edit",
 		description:
-			"Atomically replace an exact text match while preserving file encoding style and mode. Always include path, oldText, and newText in every call.",
+			"Atomically replace exact text in an existing file while preserving encoding style and mode. Use this for all edits to existing files. Always include path, oldText, and newText.",
 		parameters: EditParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {

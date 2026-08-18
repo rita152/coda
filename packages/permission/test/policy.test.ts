@@ -3,8 +3,8 @@ import {
 	commandPermissionKey,
 	createCommandPermissionPolicy,
 	NEVER_PROMPT_REASON,
-	PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
-	PATCH_REJECTED_READ_ONLY_REASON,
+	WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
+	WRITE_REJECTED_READ_ONLY_REASON,
 } from "../src/index.ts";
 
 const workspace = "/workspace";
@@ -37,6 +37,11 @@ describe("Command Permission policy", () => {
 		expect(policy.decide(request("write", { path: "secrets.env" }))).toEqual({
 			kind: "ask",
 			prompt: "Allow write?\nsecrets.env",
+		});
+		expect(policy.decide(request("process", { action: "poll", processId: "process:1" }))).toEqual({ kind: "allow" });
+		expect(policy.decide(request("process", { action: "start", command: "npm test" }))).toEqual({
+			kind: "ask",
+			prompt: "Allow process?\nnpm test",
 		});
 	});
 
@@ -92,7 +97,7 @@ describe("Command Permission policy", () => {
 		expect(restricted.decide(request("write", { path: "src/app.ts" }))).toEqual({ kind: "allow" });
 		expect(restricted.decide(request("write", { path: "/etc/passwd" }))).toEqual({
 			kind: "deny",
-			reason: PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
+			reason: WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
 		});
 
 		const readOnly = createCommandPermissionPolicy({
@@ -102,7 +107,7 @@ describe("Command Permission policy", () => {
 		});
 		expect(readOnly.decide(request("write", { path: "src/app.ts" }))).toEqual({
 			kind: "deny",
-			reason: PATCH_REJECTED_READ_ONLY_REASON,
+			reason: WRITE_REJECTED_READ_ONLY_REASON,
 		});
 	});
 

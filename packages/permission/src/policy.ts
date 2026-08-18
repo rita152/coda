@@ -10,33 +10,29 @@ import type {
 	RememberedCommandPermission,
 } from "./types.ts";
 
-const READ_ONLY_TOOLS = new Set([
-	"read",
-	"read_session_history",
-	"read_tool_output",
-	"grep",
-	"find",
-	"ls",
-	"process_poll",
-]);
+const READ_ONLY_TOOLS = new Set(["read", "read_session_history", "read_tool_output", "grep", "find", "ls"]);
 
-const FILE_WRITE_TOOLS = new Set(["write", "edit", "patch"]);
+const FILE_WRITE_TOOLS = new Set(["write", "edit"]);
 
 const TOOL_NAMES = new Map([
 	["Bash", "bash"],
 	["Write", "write"],
 	["Edit", "edit"],
-	["apply_patch", "patch"],
+	["Process", "process"],
 ]);
 
 export const NEVER_PROMPT_REASON = "approval required by policy, but AskForApproval is set to Never";
-export const PATCH_REJECTED_OUTSIDE_PROJECT_REASON =
+export const WRITE_REJECTED_OUTSIDE_PROJECT_REASON =
 	"writing outside of the project; rejected by user approval settings";
-export const PATCH_REJECTED_READ_ONLY_REASON =
+export const WRITE_REJECTED_READ_ONLY_REASON =
 	"writing is blocked by read-only sandbox; rejected by user approval settings";
 
 function canonicalToolName(toolName: string): string {
 	return TOOL_NAMES.get(toolName) ?? toolName;
+}
+
+function isReadOnlyProcess(tool: string, toolInput: Readonly<Record<string, unknown>>): boolean {
+	return tool === "process" && toolInput.action === "poll";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -109,13 +105,7 @@ function fileWritePaths(request: CommandPermissionRequest): string[] {
 			? [request.toolInput.path]
 			: [];
 	}
-	if (tool !== "patch" || typeof request.toolInput.patch !== "string") return [];
-	const paths: string[] = [];
-	for (const match of request.toolInput.patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gmu)) {
-		const path = match[1]?.trim();
-		if (path) paths.push(path);
-	}
-	return paths;
+	return [];
 }
 
 function assessFileWrite(
@@ -126,7 +116,7 @@ function assessFileWrite(
 	denyWrite: readonly string[],
 ): CommandPermissionDecision {
 	const paths = fileWritePaths(request);
-	if (paths.length === 0) return { kind: "deny", reason: "empty patch" };
+	if (paths.length === 0) return { kind: "deny", reason: "empty write path" };
 	if (approvalPolicy === "untrusted") return ask(request);
 	const constrained =
 		filesystemAccess === "unrestricted" ||
@@ -135,7 +125,7 @@ function assessFileWrite(
 	if (approvalPolicy === "never") {
 		return {
 			kind: "deny",
-			reason: writableRoots.length === 0 ? PATCH_REJECTED_READ_ONLY_REASON : PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
+			reason: writableRoots.length === 0 ? WRITE_REJECTED_READ_ONLY_REASON : WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
 		};
 	}
 	return ask(request);
@@ -175,7 +165,7 @@ export function createCommandPermissionPolicy(options: CommandPermissionPolicyOp
 				return { kind: "deny", reason: remembered.reason ?? "Command Permission denied this Tool Invocation" };
 			}
 			const tool = canonicalToolName(request.toolName);
-			if (READ_ONLY_TOOLS.has(tool)) return { kind: "allow" };
+			if (READ_ONLY_TOOLS.has(tool) || isReadOnlyProcess(tool, request.toolInput)) return { kind: "allow" };
 			if (FILE_WRITE_TOOLS.has(tool)) {
 				return assessFileWrite(request, approvalPolicy, filesystemAccess, writableRoots, denyWrite);
 			}

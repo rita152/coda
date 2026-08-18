@@ -9,8 +9,5 @@ export const BUILT_IN_CODING_TOOL_NAMES = Object.freeze([
 	"ls",
 	...MUTATION_TOOL_NAMES,
 	"bash",
-	"process_start",
-	"process_poll",
-	"process_write",
-	"process_stop",
+	"process",
 ] as const);

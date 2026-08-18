@@ -78,7 +78,7 @@ export function buildSystemPrompt(input: SystemPromptInput): SystemPromptSnapsho
 		`- Time: ${new Date(input.timestamp).toISOString()}`,
 		`- Interaction mode: ${input.capabilities.interactionMode}`,
 		"- File Tools resolve relative paths from the Workspace and accept explicit absolute paths.",
-		"- Bash and process_start execute directly on the host as the current user.",
+		"- Bash and process execute directly on the host as the current user.",
 		"",
 		"Available Tool capabilities:",
 		...(tools.length === 0 ? ["- none"] : tools.map((tool) => `- ${tool.name}: ${tool.description}`)),
