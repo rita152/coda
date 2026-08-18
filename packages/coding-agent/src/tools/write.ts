@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { AgentTool } from "@coda/agent";
 import { Type } from "@coda/ai";
 import type { FileSystem } from "../host/file-system.ts";
@@ -7,6 +6,7 @@ import type { AtomicMutationWriter } from "./atomic-mutation-writer.ts";
 import { toolFailure } from "./failure.ts";
 import { atomicWrite, type TargetMutationCoordinator } from "./mutation.ts";
 import { mutationFacts, mutationObservationFacts } from "./mutation-contract.ts";
+import { sha256 } from "./text-mutation.ts";
 
 const WriteParameters = Type.Object(
 	{
@@ -15,10 +15,6 @@ const WriteParameters = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-
-function sha256(bytes: Uint8Array): string {
-	return createHash("sha256").update(bytes).digest("hex");
-}
 
 export function createWriteTool(
 	workspace: Workspace,

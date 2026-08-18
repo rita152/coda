@@ -36,7 +36,6 @@ import { type MutationFacts, mutationFactsFromObservation } from "./mutation-sem
 import { resolveObservationSemantics } from "./observation-semantics.ts";
 
 export * from "./contracts.ts";
-export { normalizeRunEvidenceCommand } from "./failure-semantics.ts";
 
 const MAX_PATHS = 50;
 const MAX_OPERATIONS = 128;
