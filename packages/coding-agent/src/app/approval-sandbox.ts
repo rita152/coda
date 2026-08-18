@@ -26,7 +26,7 @@ export interface PermissionsCommand {
 	apply(preset: PermissionPreset): Promise<void>;
 }
 
-export interface CommandPermissionBoundOptions {
+interface CommandPermissionBoundOptions {
 	readonly tmpdir?: string;
 	readonly filesystemEnforced?: boolean;
 }

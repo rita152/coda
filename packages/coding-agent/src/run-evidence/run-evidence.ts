@@ -52,7 +52,7 @@ const MAX_TOOL_NAME_CHARACTERS = 128;
 const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 /** Minimal structural view of a private Session Record used for reconstruction. */
-export interface RunEvidenceSessionRecord {
+interface RunEvidenceSessionRecord {
 	readonly type: string;
 	readonly sequence: number;
 	readonly timestamp: number;

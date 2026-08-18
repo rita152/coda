@@ -21,8 +21,6 @@ import { createReadSessionHistoryTool } from "./read-session-history.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
 import { createWriteTool } from "./write.ts";
 
-export { BUILT_IN_CODING_TOOL_NAMES } from "./contracts.ts";
-
 type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
 
 export function createCodingToolContributions(options: {

@@ -588,7 +588,7 @@ function validatorFor(type: SessionRecordType): SessionRecordPayloadValidator {
 	return (payload, version) => validateSessionRecordPayload(type, payload, version);
 }
 
-export const SESSION_RECORD_PAYLOAD_VALIDATORS = Object.freeze({
+const SESSION_RECORD_PAYLOAD_VALIDATORS = Object.freeze({
 	run_started: validatorFor("run_started"),
 	run_budget_exhausted: validatorFor("run_budget_exhausted"),
 	attempt_started: validatorFor("attempt_started"),

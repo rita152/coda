@@ -1,6 +1,6 @@
 import type { RunControlProgressFact } from "./types.ts";
 
-export interface RunProgressSnapshot {
+interface RunProgressSnapshot {
 	readonly revision: number;
 	readonly consecutiveStationaryTurns: number;
 	readonly workspaceContentCount: number;

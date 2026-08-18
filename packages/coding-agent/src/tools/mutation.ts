@@ -28,7 +28,7 @@ export class TargetMutationCoordinator {
 	}
 }
 
-export interface AtomicWriteResult {
+interface AtomicWriteResult {
 	readonly created: boolean;
 	readonly previousSize: number;
 	readonly size: number;

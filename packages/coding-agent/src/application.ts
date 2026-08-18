@@ -74,9 +74,8 @@ import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
 import { confirmFromTerminal } from "./ui/prompts.ts";
 
-export type { ApplicationInput, ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
-export type { ModelSelection } from "./models/model-selection.ts";
-export type { ProjectTrustRecord, SettingsStore, UserSettings } from "./settings/types.ts";
+export type { ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
+export type { SettingsStore, UserSettings } from "./settings/types.ts";
 
 export interface ApplicationRuntime {
 	readonly cwd: string;

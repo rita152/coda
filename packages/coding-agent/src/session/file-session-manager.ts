@@ -23,9 +23,6 @@ import type {
 	SessionWorkspace,
 } from "./types.ts";
 
-export type { ProcessInspector, ProcessStatus, SessionLockOwner } from "./session-lease.ts";
-export type { InterruptedToolRecovery, InterruptedToolRecoveryRequest } from "./session-recovery.ts";
-
 export interface FileSessionManagerOptions extends SessionRuntime {
 	readonly fileSystem: FileSystem;
 	readonly homeDirectory: string;
