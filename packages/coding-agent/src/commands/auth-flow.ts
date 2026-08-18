@@ -1,9 +1,6 @@
 import { AUTH_API_PROTOCOLS, type AuthApiProtocol, type CustomProviderInput } from "../models/types.ts";
 import type { CommandFlowMenu, CommandFlowNavigation, CommandFlowPrompt, CommandFlowScreen } from "./flow-types.ts";
 
-export type { AuthApiProtocol, CustomProviderInput } from "../models/types.ts";
-export { AUTH_API_PROTOCOLS } from "../models/types.ts";
-
 export interface AuthProviderEntry {
 	readonly id: string;
 	readonly name: string;

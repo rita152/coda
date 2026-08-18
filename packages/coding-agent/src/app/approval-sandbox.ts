@@ -156,5 +156,3 @@ export async function replaceProcessConfinement(input: {
 	input.holder.current = next;
 	input.resources.useProcessConfinement(next);
 }
-
-export { isSandboxMode };

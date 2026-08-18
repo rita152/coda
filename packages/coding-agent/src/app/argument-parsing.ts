@@ -1,13 +1,13 @@
 import type { Immutable, RunBudget } from "@coda/agent";
 import type { Api, AssistantMessage, Model, Models, ThinkingLevel } from "@coda/ai";
 import type { ApprovalPolicy } from "@coda/permission";
-import type { SandboxMode } from "@coda/sandbox";
+import { isSandboxMode, type SandboxMode } from "@coda/sandbox";
 import type { TerminalColorScheme } from "@coda/tui";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { ModelSelection } from "../models/model-selection.ts";
 import { REASONING_EFFORTS } from "../models/reasoning-effort.ts";
 import type { RunControlConfiguration } from "../run-control/index.ts";
-import { isApprovalPolicy, isSandboxMode } from "./approval-sandbox.ts";
+import { isApprovalPolicy } from "./approval-sandbox.ts";
 import type { JsonEventStreamMode } from "./json-event-writer.ts";
 
 const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
