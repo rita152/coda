@@ -74,12 +74,12 @@ function hookToolName(toolName: string): { readonly name: string; readonly alias
 	switch (toolName) {
 		case "bash":
 			return { name: "Bash", aliases: ["bash"] };
-		case "patch":
-			return { name: "apply_patch", aliases: ["patch", "Write", "Edit"] };
 		case "edit":
 			return { name: "Edit", aliases: ["edit"] };
 		case "write":
 			return { name: "Write", aliases: ["write"] };
+		case "process":
+			return { name: "Process", aliases: ["process"] };
 		default:
 			return { name: toolName, aliases: [] };
 	}

@@ -80,6 +80,88 @@ describe("PermissionLifecycleHookHost", () => {
 		await expect(remembered.preToolUse(request)).resolves.toEqual({ continue: true });
 	});
 
+	it("denies an ask when no interactive ask port is available", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({ approvalPolicy: "untrusted" }),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "headless",
+				toolInput: { command: "npm test" },
+			}),
+		).resolves.toEqual({
+			continue: false,
+			reason: "Command Permission requires an interactive Session",
+		});
+	});
+
+	it("asks for Codex require_escalated sandbox_permissions under on-request", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({
+				approvalPolicy: "on-request",
+				filesystemAccess: "restricted",
+			}),
+			ask: async () => ({ action: "deny", reason: "stay confined" }),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "escalate",
+				toolInput: { command: "curl example.test", sandbox_permissions: "require_escalated" },
+			}),
+		).resolves.toEqual({ continue: false, reason: "stay confined" });
+	});
+
+	it("denies require_escalated when approval is never", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({
+				approvalPolicy: "never",
+				filesystemAccess: "restricted",
+			}),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "print-escalate",
+				toolInput: { command: "curl example.test", sandbox_permissions: "require_escalated" },
+			}),
+		).resolves.toEqual({
+			continue: false,
+			reason:
+				"approval policy is Never; reject command — you should not ask for escalated permissions if the approval policy is Never",
+		});
+	});
+
+	it("rejects with_additional_permissions when additional_permissions are missing", async () => {
+		const host = new PermissionLifecycleHookHost({
+			inner: inner({ continue: true }),
+			policy: createCommandPermissionPolicy({
+				approvalPolicy: "on-request",
+				filesystemAccess: "restricted",
+			}),
+			ask: async () => ({ action: "allow" }),
+		});
+		await expect(
+			host.preToolUse({
+				...turn,
+				toolName: "bash",
+				toolUseId: "widen",
+				toolInput: { command: "curl example.test", sandbox_permissions: "with_additional_permissions" },
+			}),
+		).resolves.toEqual({
+			continue: false,
+			reason:
+				"missing `additional_permissions`; provide at least one of `network` or `file_system` when using `with_additional_permissions`",
+		});
+	});
+
 	it("resolves a hook permissionAsk through the ask port", async () => {
 		const host = new PermissionLifecycleHookHost({
 			inner: inner({ continue: true, permissionAsk: true, reason: "hook asked" }),

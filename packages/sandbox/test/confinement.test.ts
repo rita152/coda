@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+	denyWriteForSandboxMode,
 	filesystemAccessForSandboxMode,
 	openProcessConfinement,
 	ProcessConfinementError,
 	processConfinementActive,
 	resolvedConfinementConfig,
+	writableRootsForSandboxMode,
 } from "../src/index.ts";
 import type { ProcessConfinementConfig, ProcessConfinementEngine } from "../src/types.ts";
 
@@ -35,7 +37,16 @@ describe("Process Confinement", () => {
 				workspace: "/workspace",
 				mode: "workspace-write",
 				allowWrite: ["/workspace", "/tmp"],
-				denyWrite: ["/workspace/.git", "/workspace/.agents", "/workspace/.coda"],
+				denyWrite: [
+					"/workspace/.git",
+					"/workspace/.agents",
+					"/workspace/.coda",
+					"/workspace/.codex",
+					"/tmp/.git",
+					"/tmp/.agents",
+					"/tmp/.coda",
+					"/tmp/.codex",
+				],
 				denyRead: [],
 				allowedDomains: [],
 				deniedDomains: [],
@@ -75,6 +86,35 @@ describe("Process Confinement", () => {
 		expect(processConfinementActive("danger-full-access")).toBe(false);
 		expect(filesystemAccessForSandboxMode("read-only")).toBe("restricted");
 		expect(filesystemAccessForSandboxMode("danger-full-access")).toBe("unrestricted");
+	});
+
+	it("adds TMPDIR to workspace-write roots and protects metadata under every root", () => {
+		expect(writableRootsForSandboxMode("/workspace", "workspace-write", { tmpdir: "/var/folders/t" })).toEqual([
+			"/workspace",
+			"/tmp",
+			"/var/folders/t",
+		]);
+		expect(denyWriteForSandboxMode("/workspace", "workspace-write", { tmpdir: "/var/folders/t" })).toEqual([
+			"/workspace/.git",
+			"/workspace/.agents",
+			"/workspace/.coda",
+			"/workspace/.codex",
+			"/tmp/.git",
+			"/tmp/.agents",
+			"/tmp/.coda",
+			"/tmp/.codex",
+			"/var/folders/t/.git",
+			"/var/folders/t/.agents",
+			"/var/folders/t/.coda",
+			"/var/folders/t/.codex",
+		]);
+		expect(
+			resolvedConfinementConfig({ workspace: "/workspace", mode: "workspace-write", tmpdir: "/var/folders/t" }),
+		).toEqual(
+			expect.objectContaining({
+				allowWrite: ["/workspace", "/tmp", "/var/folders/t"],
+			}),
+		);
 	});
 
 	it("rejects Windows and relative Workspace paths", async () => {

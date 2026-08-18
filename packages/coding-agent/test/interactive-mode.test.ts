@@ -772,7 +772,7 @@ describe("interactive TUI mode", () => {
 		expect(stderr.value).toBe("");
 	});
 
-	it("applies /permissions Full Access after confirmation and persists the preset", async () => {
+	it("applies /permissions Full Access after confirmation for this Session only", async () => {
 		const runtime = testTimeRuntime(3_660);
 		const faux = fauxProvider({ runtime });
 		const models = createModels({ runtime });
@@ -829,8 +829,8 @@ describe("interactive TUI mode", () => {
 		await terminal.emit(key("c", { text: "c", control: true }));
 
 		await expect(running).resolves.toBe(0);
-		expect(saved?.permission?.approvalPolicy).toBe("never");
-		expect(saved?.sandbox?.mode).toBe("danger-full-access");
+		expect(saved?.permission?.approvalPolicy).not.toBe("never");
+		expect(saved?.sandbox?.mode).not.toBe("danger-full-access");
 		expect(stderr.value).toBe("");
 	});
 

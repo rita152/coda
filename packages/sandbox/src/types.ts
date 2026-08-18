@@ -21,6 +21,7 @@ export interface ProcessConfinementConfig {
 	readonly denyRead?: readonly string[];
 	readonly allowedDomains?: readonly string[];
 	readonly deniedDomains?: readonly string[];
+	readonly tmpdir?: string;
 }
 
 export interface WrapScriptRequest {

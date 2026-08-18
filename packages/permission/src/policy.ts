@@ -1,42 +1,40 @@
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 import { isDangerousCommand, isKnownSafeCommand, shellCommandForToolInput } from "./command-safety.ts";
-import type {
-	ApprovalPolicy,
-	CommandPermissionDecision,
-	CommandPermissionPolicy,
-	CommandPermissionPolicyOptions,
-	CommandPermissionRequest,
-	FilesystemAccess,
-	RememberedCommandPermission,
+import { sandboxPermissionRequestReason } from "./sandbox-permissions.ts";
+import {
+	type ApprovalPolicy,
+	type CommandPermissionDecision,
+	type CommandPermissionPolicy,
+	type CommandPermissionPolicyOptions,
+	type CommandPermissionRequest,
+	type FilesystemAccess,
+	type RememberedCommandPermission,
+	requestsSandboxOverride,
 } from "./types.ts";
 
-const READ_ONLY_TOOLS = new Set([
-	"read",
-	"read_session_history",
-	"read_tool_output",
-	"grep",
-	"find",
-	"ls",
-	"process_poll",
-]);
+const READ_ONLY_TOOLS = new Set(["read", "read_session_history", "read_tool_output", "grep", "find", "ls"]);
 
-const FILE_WRITE_TOOLS = new Set(["write", "edit", "patch"]);
+const FILE_WRITE_TOOLS = new Set(["write", "edit"]);
 
 const TOOL_NAMES = new Map([
 	["Bash", "bash"],
 	["Write", "write"],
 	["Edit", "edit"],
-	["apply_patch", "patch"],
+	["Process", "process"],
 ]);
 
 export const NEVER_PROMPT_REASON = "approval required by policy, but AskForApproval is set to Never";
-export const PATCH_REJECTED_OUTSIDE_PROJECT_REASON =
+export const WRITE_REJECTED_OUTSIDE_PROJECT_REASON =
 	"writing outside of the project; rejected by user approval settings";
-export const PATCH_REJECTED_READ_ONLY_REASON =
+export const WRITE_REJECTED_READ_ONLY_REASON =
 	"writing is blocked by read-only sandbox; rejected by user approval settings";
 
 function canonicalToolName(toolName: string): string {
 	return TOOL_NAMES.get(toolName) ?? toolName;
+}
+
+function isReadOnlyProcess(tool: string, toolInput: Readonly<Record<string, unknown>>): boolean {
+	return tool === "process" && toolInput.action === "poll";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,7 +65,12 @@ function summarize(request: CommandPermissionRequest): string {
 }
 
 export function commandPermissionPrompt(request: CommandPermissionRequest): string {
-	return `Allow ${request.toolName}?\n${summarize(request)}`;
+	const prompt = `Allow ${request.toolName}?\n${summarize(request)}`;
+	const justification = request.toolInput.justification;
+	if (typeof justification === "string" && justification.length > 0) {
+		return `${prompt}\n${justification}`;
+	}
+	return prompt;
 }
 
 function applies(record: RememberedCommandPermission, request: CommandPermissionRequest, key: string): boolean {
@@ -109,13 +112,7 @@ function fileWritePaths(request: CommandPermissionRequest): string[] {
 			? [request.toolInput.path]
 			: [];
 	}
-	if (tool !== "patch" || typeof request.toolInput.patch !== "string") return [];
-	const paths: string[] = [];
-	for (const match of request.toolInput.patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gmu)) {
-		const path = match[1]?.trim();
-		if (path) paths.push(path);
-	}
-	return paths;
+	return [];
 }
 
 function assessFileWrite(
@@ -124,18 +121,32 @@ function assessFileWrite(
 	filesystemAccess: FilesystemAccess,
 	writableRoots: readonly string[],
 	denyWrite: readonly string[],
+	filesystemEnforced: boolean,
 ): CommandPermissionDecision {
 	const paths = fileWritePaths(request);
-	if (paths.length === 0) return { kind: "deny", reason: "empty patch" };
+	if (paths.length === 0) return { kind: "deny", reason: "empty write path" };
 	if (approvalPolicy === "untrusted") return ask(request);
 	const constrained =
 		filesystemAccess === "unrestricted" ||
 		paths.every((path) => isWritablePath(path, request.workspace, writableRoots, denyWrite));
-	if (constrained) return { kind: "allow" };
+	if (constrained) {
+		if (filesystemAccess === "restricted" && filesystemEnforced === false) {
+			return approvalPolicy === "never"
+				? {
+						kind: "deny",
+						reason:
+							writableRoots.length === 0
+								? WRITE_REJECTED_READ_ONLY_REASON
+								: WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
+					}
+				: ask(request);
+		}
+		return { kind: "allow" };
+	}
 	if (approvalPolicy === "never") {
 		return {
 			kind: "deny",
-			reason: writableRoots.length === 0 ? PATCH_REJECTED_READ_ONLY_REASON : PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
+			reason: writableRoots.length === 0 ? WRITE_REJECTED_READ_ONLY_REASON : WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
 		};
 	}
 	return ask(request);
@@ -145,18 +156,29 @@ function assessExec(
 	request: CommandPermissionRequest,
 	approvalPolicy: ApprovalPolicy,
 	filesystemAccess: FilesystemAccess,
+	filesystemEnforced: boolean,
 ): CommandPermissionDecision {
+	const invalid = sandboxPermissionRequestReason(request.toolInput, approvalPolicy);
+	if (invalid) return { kind: "deny", reason: invalid };
 	const command = shellCommandForToolInput(request.toolInput);
 	const knownSafe = command !== undefined && isKnownSafeCommand(command);
 	const dangerous = command !== undefined && isDangerousCommand(command);
-	if (knownSafe && approvalPolicy === "untrusted") return { kind: "allow" };
+	const override = request.sandboxOverride === true || requestsSandboxOverride(request.toolInput);
+	if (knownSafe && !override) return { kind: "allow" };
 	if (dangerous) {
 		return approvalPolicy === "never" ? { kind: "deny", reason: NEVER_PROMPT_REASON } : ask(request);
 	}
-	if (approvalPolicy === "never") return { kind: "allow" };
+	if (approvalPolicy === "never") {
+		if (override) return { kind: "deny", reason: NEVER_PROMPT_REASON };
+		if (filesystemAccess === "restricted" && filesystemEnforced === false) {
+			return { kind: "deny", reason: NEVER_PROMPT_REASON };
+		}
+		return { kind: "allow" };
+	}
 	if (approvalPolicy === "untrusted") return ask(request);
 	if (filesystemAccess === "unrestricted") return { kind: "allow" };
-	if (request.sandboxOverride === true) return ask(request);
+	if (override) return ask(request);
+	if (filesystemEnforced === false) return ask(request);
 	return { kind: "allow" };
 }
 
@@ -165,6 +187,7 @@ export function createCommandPermissionPolicy(options: CommandPermissionPolicyOp
 	let filesystemAccess = options.filesystemAccess ?? "unrestricted";
 	let writableRoots = options.writableRoots ?? [];
 	let denyWrite = options.denyWrite ?? [];
+	let filesystemEnforced = options.filesystemEnforced ?? true;
 	const records = [...(options.remembered ?? [])];
 	return {
 		decide(request) {
@@ -175,11 +198,18 @@ export function createCommandPermissionPolicy(options: CommandPermissionPolicyOp
 				return { kind: "deny", reason: remembered.reason ?? "Command Permission denied this Tool Invocation" };
 			}
 			const tool = canonicalToolName(request.toolName);
-			if (READ_ONLY_TOOLS.has(tool)) return { kind: "allow" };
+			if (READ_ONLY_TOOLS.has(tool) || isReadOnlyProcess(tool, request.toolInput)) return { kind: "allow" };
 			if (FILE_WRITE_TOOLS.has(tool)) {
-				return assessFileWrite(request, approvalPolicy, filesystemAccess, writableRoots, denyWrite);
+				return assessFileWrite(
+					request,
+					approvalPolicy,
+					filesystemAccess,
+					writableRoots,
+					denyWrite,
+					filesystemEnforced,
+				);
 			}
-			return assessExec(request, approvalPolicy, filesystemAccess);
+			return assessExec(request, approvalPolicy, filesystemAccess, filesystemEnforced);
 		},
 		remember(request, decision) {
 			const record: RememberedCommandPermission = Object.freeze({
@@ -202,6 +232,7 @@ export function createCommandPermissionPolicy(options: CommandPermissionPolicyOp
 			if (next.filesystemAccess !== undefined) filesystemAccess = next.filesystemAccess;
 			if (next.writableRoots !== undefined) writableRoots = next.writableRoots;
 			if (next.denyWrite !== undefined) denyWrite = next.denyWrite;
+			if (next.filesystemEnforced !== undefined) filesystemEnforced = next.filesystemEnforced;
 		},
 		snapshot() {
 			return Object.freeze({
@@ -209,6 +240,7 @@ export function createCommandPermissionPolicy(options: CommandPermissionPolicyOp
 				filesystemAccess,
 				writableRoots: Object.freeze([...writableRoots]),
 				denyWrite: Object.freeze([...denyWrite]),
+				filesystemEnforced,
 			});
 		},
 	};

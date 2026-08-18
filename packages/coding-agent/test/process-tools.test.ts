@@ -97,26 +97,29 @@ describe("process lifecycle Tools", () => {
 		let secondProcessId = "";
 		let shutdownProcessId = "";
 		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("process_start", { command: "worker-one" }, { id: "start-one" }), {
-				stopReason: "toolUse",
-				timestamp: 1_300,
-			}),
+			fauxAssistantMessage(
+				fauxToolCall("process", { action: "start", command: "worker-one" }, { id: "start-one" }),
+				{
+					stopReason: "toolUse",
+					timestamp: 1_300,
+				},
+			),
 			(context) => {
 				const result = context.messages.at(-1);
 				expect(result).toMatchObject({
 					role: "toolResult",
-					toolName: "process_start",
+					toolName: "process",
 					observation: { status: "ok", facts: { state: "running", processId: expect.any(String) } },
 				});
-				if (!result || result.role !== "toolResult") throw new Error("Expected process_start result");
+				if (!result || result.role !== "toolResult") throw new Error("Expected process start result");
 				const identity = result.observation?.facts?.processId;
 				if (typeof identity !== "string") throw new Error("Expected opaque process identity");
 				firstProcessId = identity;
 				expect(JSON.stringify(result.details)).not.toContain('"pid"');
 				return fauxAssistantMessage(
 					fauxToolCall(
-						"process_write",
-						{ processId: firstProcessId, input: "hello", closeStdin: true },
+						"process",
+						{ action: "write", processId: firstProcessId, input: "hello", closeStdin: true },
 						{ id: "write-one" },
 					),
 					{ stopReason: "toolUse", timestamp: 1_300 },
@@ -125,61 +128,64 @@ describe("process lifecycle Tools", () => {
 			(context) => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
-					toolName: "process_write",
+					toolName: "process",
 				});
 				return fauxAssistantMessage(
-					fauxToolCall("process_poll", { processId: firstProcessId }, { id: "poll-one" }),
+					fauxToolCall("process", { action: "poll", processId: firstProcessId }, { id: "poll-one" }),
 					{ stopReason: "toolUse", timestamp: 1_300 },
 				);
 			},
 			(context) => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
-					toolName: "process_poll",
+					toolName: "process",
 					observation: { status: "ok", truncated: false, facts: { state: "completed", exitCode: 0 } },
 					content: [{ type: "text", text: expect.stringContaining("inherited|allowed\nhello") }],
 				});
-				return fauxAssistantMessage(fauxToolCall("process_start", { command: "worker-two" }, { id: "start-two" }), {
-					stopReason: "toolUse",
-					timestamp: 1_300,
-				});
+				return fauxAssistantMessage(
+					fauxToolCall("process", { action: "start", command: "worker-two" }, { id: "start-two" }),
+					{
+						stopReason: "toolUse",
+						timestamp: 1_300,
+					},
+				);
 			},
 			(context) => {
 				const result = context.messages.at(-1);
-				if (!result || result.role !== "toolResult") throw new Error("Expected second process_start result");
+				if (!result || result.role !== "toolResult") throw new Error("Expected second process start result");
 				const identity = result.observation?.facts?.processId;
 				if (typeof identity !== "string") throw new Error("Expected second process identity");
 				secondProcessId = identity;
 				return fauxAssistantMessage(
-					fauxToolCall("process_stop", { processId: secondProcessId }, { id: "stop-two" }),
+					fauxToolCall("process", { action: "stop", processId: secondProcessId }, { id: "stop-two" }),
 					{ stopReason: "toolUse", timestamp: 1_300 },
 				);
 			},
 			(context) => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
-					toolName: "process_stop",
+					toolName: "process",
 					observation: { status: "ok", facts: { state: "stopped", signal: "SIGTERM" } },
 				});
 				return fauxAssistantMessage(
-					fauxToolCall("process_poll", { processId: secondProcessId }, { id: "poll-stale" }),
+					fauxToolCall("process", { action: "poll", processId: secondProcessId }, { id: "poll-stale" }),
 					{ stopReason: "toolUse", timestamp: 1_300 },
 				);
 			},
 			(context) => {
 				expect(context.messages.at(-1)).toMatchObject({
 					role: "toolResult",
-					toolName: "process_poll",
+					toolName: "process",
 					observation: { status: "error", facts: { state: "stale" } },
 				});
 				return fauxAssistantMessage(
-					fauxToolCall("process_start", { command: "worker-shutdown" }, { id: "start-shutdown" }),
+					fauxToolCall("process", { action: "start", command: "worker-shutdown" }, { id: "start-shutdown" }),
 					{ stopReason: "toolUse", timestamp: 1_300 },
 				);
 			},
 			(context) => {
 				const result = context.messages.at(-1);
-				if (!result || result.role !== "toolResult") throw new Error("Expected shutdown process_start result");
+				if (!result || result.role !== "toolResult") throw new Error("Expected shutdown process start result");
 				const identity = result.observation?.facts?.processId;
 				if (typeof identity !== "string") throw new Error("Expected shutdown process identity");
 				shutdownProcessId = identity;
@@ -248,10 +254,13 @@ describe("process lifecycle Tools", () => {
 		const runtime = testTimeRuntime(1_400);
 		const faux = fauxProvider({ runtime });
 		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("process_start", { command: "long-worker" }, { id: "start-long" }), {
-				stopReason: "toolUse",
-				timestamp: 1_400,
-			}),
+			fauxAssistantMessage(
+				fauxToolCall("process", { action: "start", command: "long-worker" }, { id: "start-long" }),
+				{
+					stopReason: "toolUse",
+					timestamp: 1_400,
+				},
+			),
 			async () => {
 				secondCallStarted.resolve();
 				await responseGate.promise;

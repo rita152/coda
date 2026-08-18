@@ -4,8 +4,8 @@ export {
 	commandPermissionPrompt,
 	createCommandPermissionPolicy,
 	NEVER_PROMPT_REASON,
-	PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
-	PATCH_REJECTED_READ_ONLY_REASON,
+	WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
+	WRITE_REJECTED_READ_ONLY_REASON,
 } from "./policy.ts";
 export type {
 	ApprovalPolicy,
@@ -18,5 +18,6 @@ export type {
 	FilesystemAccess,
 	PermissionRememberScope,
 	RememberedCommandPermission,
+	SandboxPermission,
 } from "./types.ts";
-export { APPROVAL_POLICIES, FILESYSTEM_ACCESS } from "./types.ts";
+export { APPROVAL_POLICIES, FILESYSTEM_ACCESS, requestsSandboxOverride } from "./types.ts";

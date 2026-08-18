@@ -8,13 +8,14 @@ describe("@coda/permission public contract", () => {
 			"APPROVAL_POLICIES",
 			"FILESYSTEM_ACCESS",
 			"NEVER_PROMPT_REASON",
-			"PATCH_REJECTED_OUTSIDE_PROJECT_REASON",
-			"PATCH_REJECTED_READ_ONLY_REASON",
+			"WRITE_REJECTED_OUTSIDE_PROJECT_REASON",
+			"WRITE_REJECTED_READ_ONLY_REASON",
 			"commandPermissionKey",
 			"commandPermissionPrompt",
 			"createCommandPermissionPolicy",
 			"isDangerousCommand",
 			"isKnownSafeCommand",
+			"requestsSandboxOverride",
 		]);
 	});
 

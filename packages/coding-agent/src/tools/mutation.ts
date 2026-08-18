@@ -74,44 +74,6 @@ export async function atomicWrite(
 	);
 }
 
-export interface AtomicDeleteResult {
-	readonly previousSize: number;
-}
-
-export async function atomicDelete(
-	workspace: Workspace,
-	fileSystem: FileSystem,
-	initial: ResolvedWorkspacePath,
-	context: ToolExecutionContext,
-	writer: AtomicMutationWriter,
-	expectedSha256: string,
-	expectedIdentity?: MutationTargetIdentity,
-): Promise<AtomicDeleteResult> {
-	if (!initial.exists) throw new Error(`Target does not exist: ${initial.canonicalPath}`);
-	const previous = await fileSystem.stat(initial.canonicalPath);
-	if (previous.kind !== "file") throw new Error(`Path is not a file: ${initial.canonicalPath}`);
-	if (expectedIdentity && !identityMatches(previous, expectedIdentity)) {
-		throw new Error("Target identity changed before mutation identity check");
-	}
-	context.signal.throwIfAborted();
-	const rechecked = await workspace.resolvePath(initial.requestedPath);
-	if (!rechecked.exists || rechecked.canonicalPath !== initial.canonicalPath) {
-		throw new Error("Target changed during mutation identity check");
-	}
-	const current = await fileSystem.readFile(rechecked.canonicalPath);
-	if (createHash("sha256").update(current).digest("hex") !== expectedSha256) {
-		throw new Error("Target content changed before mutation identity check");
-	}
-	return writer.delete(
-		{
-			target: rechecked.canonicalPath,
-			expectedSha256,
-			expectedIdentity,
-		},
-		context,
-	);
-}
-
 function identityMatches(
 	status: { readonly device?: string; readonly inode?: string } | undefined,
 	expected: MutationTargetIdentity,

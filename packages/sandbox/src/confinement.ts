@@ -27,13 +27,33 @@ export function filesystemAccessForSandboxMode(mode: SandboxMode): "restricted" 
 	return mode === "danger-full-access" ? "unrestricted" : "restricted";
 }
 
-export function writableRootsForSandboxMode(workspace: string, mode: SandboxMode): readonly string[] {
-	return mode === "workspace-write" ? [workspace, "/tmp"] : [];
+const PROTECTED_METADATA_NAMES = [".git", ".agents", ".coda", ".codex"] as const;
+
+export interface SandboxRootOptions {
+	readonly tmpdir?: string;
 }
 
-export function denyWriteForSandboxMode(workspace: string, mode: SandboxMode): readonly string[] {
+export function writableRootsForSandboxMode(
+	workspace: string,
+	mode: SandboxMode,
+	options: SandboxRootOptions = {},
+): readonly string[] {
 	if (mode !== "workspace-write") return [];
-	return [join(workspace, ".git"), join(workspace, ".agents"), join(workspace, ".coda")];
+	const roots = [workspace, "/tmp"];
+	const tmpdir = options.tmpdir;
+	if (tmpdir && isAbsolute(tmpdir) && tmpdir !== "/tmp" && tmpdir !== workspace) roots.push(tmpdir);
+	return roots;
+}
+
+export function denyWriteForSandboxMode(
+	workspace: string,
+	mode: SandboxMode,
+	options: SandboxRootOptions = {},
+): readonly string[] {
+	if (mode !== "workspace-write") return [];
+	return writableRootsForSandboxMode(workspace, mode, options).flatMap((root) =>
+		PROTECTED_METADATA_NAMES.map((name) => join(root, name)),
+	);
 }
 
 export function resolvedConfinementConfig(config: ProcessConfinementConfig): ProcessConfinementConfig {
@@ -42,8 +62,9 @@ export function resolvedConfinementConfig(config: ProcessConfinementConfig): Pro
 	if (mode === "danger-full-access") {
 		throw new ProcessConfinementError("initialize-failed", "danger-full-access does not use Process Confinement");
 	}
-	const allowWrite = config.allowWrite ?? (mode === "read-only" ? [] : [workspace, "/tmp"]);
-	const denyWrite = config.denyWrite ?? denyWriteForSandboxMode(workspace, mode);
+	const roots = writableRootsForSandboxMode(workspace, mode, { tmpdir: config.tmpdir });
+	const allowWrite = config.allowWrite ?? (mode === "read-only" ? [] : [...roots]);
+	const denyWrite = config.denyWrite ?? denyWriteForSandboxMode(workspace, mode, { tmpdir: config.tmpdir });
 	return Object.freeze({
 		workspace,
 		mode,

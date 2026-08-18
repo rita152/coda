@@ -5,27 +5,86 @@ import { type HostProcessRuntime, hostProcessEnvironment } from "../host/runtime
 import type { Workspace } from "../host/workspace.ts";
 import type { ProcessSessionManager, ProcessSessionSnapshot, ProcessSessionState } from "./process-session-manager.ts";
 
-const ProcessStartParameters = Type.Object(
+const ProcessParameters = Type.Object(
 	{
-		command: Type.String({ minLength: 1 }),
-		timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 86_400_000 })),
+		action: Type.Union([Type.Literal("start"), Type.Literal("poll"), Type.Literal("write"), Type.Literal("stop")]),
+		command: Type.Optional(
+			Type.String({
+				minLength: 1,
+				description: "Required for action=start. The non-interactive Shell command to run.",
+			}),
+		),
+		timeoutMs: Type.Optional(
+			Type.Integer({
+				minimum: 1,
+				maximum: 86_400_000,
+				description: "Optional lifetime limit for action=start.",
+			}),
+		),
+		processId: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: 256,
+				description: "Required for action=poll, write, and stop.",
+			}),
+		),
+		input: Type.Optional(
+			Type.String({
+				description: "Required for action=write. Bytes to write to the process stdin.",
+			}),
+		),
+		closeStdin: Type.Optional(
+			Type.Boolean({
+				description: "For action=write, close stdin after writing.",
+			}),
+		),
+		sandbox_permissions: Type.Optional(
+			Type.Union([
+				Type.Literal("use_default"),
+				Type.Literal("require_escalated"),
+				Type.Literal("with_additional_permissions"),
+			]),
+		),
+		justification: Type.Optional(Type.String()),
+		additional_permissions: Type.Optional(
+			Type.Object(
+				{
+					network: Type.Optional(
+						Type.Object({ enabled: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+					),
+					file_system: Type.Optional(
+						Type.Object(
+							{
+								read: Type.Optional(Type.Array(Type.String())),
+								write: Type.Optional(Type.Array(Type.String())),
+								entries: Type.Optional(Type.Array(Type.Unknown())),
+								glob_scan_max_depth: Type.Optional(Type.Integer({ minimum: 1 })),
+							},
+							{ additionalProperties: false },
+						),
+					),
+				},
+				{ additionalProperties: false },
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
 
-const ProcessIdentityParameters = Type.Object(
-	{ processId: Type.String({ minLength: 1, maxLength: 256 }) },
-	{ additionalProperties: false },
-);
-
-const ProcessWriteParameters = Type.Object(
-	{
-		processId: Type.String({ minLength: 1, maxLength: 256 }),
-		input: Type.String(),
-		closeStdin: Type.Optional(Type.Boolean()),
-	},
-	{ additionalProperties: false },
-);
+function processToolFailure(
+	content: string,
+	details: { readonly code: string; readonly action: string },
+): ToolExecutionOutput {
+	return {
+		content,
+		observation: {
+			status: "error",
+			truncated: false,
+			facts: { code: details.code },
+		},
+		details: { ...details, status: "failed" },
+	};
+}
 
 function observationStatus(state: ProcessSessionState): "ok" | "error" {
 	if (state === "failed" || state === "stale") return "error";
@@ -58,7 +117,11 @@ function snapshotContent(snapshot: ProcessSessionSnapshot, includeOutput: boolea
 	return lines.join("\n");
 }
 
-function snapshotOutput(snapshot: ProcessSessionSnapshot, includeOutput: boolean): ToolExecutionOutput {
+function snapshotOutput(
+	snapshot: ProcessSessionSnapshot,
+	includeOutput: boolean,
+	details: Record<string, unknown> = {},
+): ToolExecutionOutput {
 	const status = observationStatus(snapshot.state);
 	return {
 		content: snapshotContent(snapshot, includeOutput),
@@ -68,11 +131,18 @@ function snapshotOutput(snapshot: ProcessSessionSnapshot, includeOutput: boolean
 			facts: snapshotFacts(snapshot),
 			...(snapshot.outputRef ? { outputRef: snapshot.outputRef } : {}),
 		},
-		details: snapshot,
+		details: { ...snapshot, ...details },
 	};
 }
 
-export function createProcessTools(options: {
+function requiredProcessId(action: string, processId: string | undefined): string | ToolExecutionOutput {
+	if (typeof processId !== "string" || processId.length === 0) {
+		return processToolFailure(`process action=${action} requires processId`, { code: "invalid_arguments", action });
+	}
+	return processId;
+}
+
+export function createProcessTool(options: {
 	readonly workspace: Workspace;
 	readonly manager: ProcessSessionManager;
 	readonly shellExecutable: string;
@@ -81,106 +151,133 @@ export function createProcessTools(options: {
 	readonly wrapScript?: (
 		request: Parameters<ProcessConfinement["wrapScript"]>[0],
 	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
-}): readonly AgentTool[] {
-	const start: AgentTool<typeof ProcessStartParameters> = {
-		name: "process_start",
+}): AgentTool<typeof ProcessParameters> {
+	return {
+		name: "process",
 		description:
-			"Start one background non-interactive Shell process directly on the host. Returns an opaque process-local identity for polling, stdin, or stop.",
-		parameters: ProcessStartParameters,
+			"Control one background non-interactive Shell process on the host. action=start runs a command and returns an opaque process-local identity. action=poll reads the next bounded output increment. action=write writes stdin. action=stop stops the process and its descendants.",
+		parameters: ProcessParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context): Promise<ToolExecutionOutput> => {
-			const environment = hostProcessEnvironment(options.runtime);
-			try {
-				const confined = options.wrapScript
-					? await options.wrapScript({
-							command: arguments_.command,
-							shell: options.shellExecutable,
-							cwd: options.workspace.root,
-							environment,
-							commandId: String(context.invocationId),
-						})
-					: undefined;
-				const spawn = confined ?? {
-					executable: options.shellExecutable,
-					args: ["-c", arguments_.command] as const,
-					environment,
-				};
-				const snapshot = await options.manager.start(
-					{
-						executable: spawn.executable,
-						args: [...spawn.args],
-						cwd: options.workspace.root,
-						environment: spawn.environment,
-						signal: context.signal,
-						timeoutMs: arguments_.timeoutMs ?? 3_600_000,
-					},
-					options.sessionId,
-				);
-				const result = snapshotOutput(snapshot, false);
-				return result;
-			} catch (error) {
-				context.signal.throwIfAborted();
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: `Process failed to start: ${message}`,
-					observation: {
-						status: "error",
-						truncated: false,
-						facts: {
-							state: "failed",
-							code: "launch_failed",
+			switch (arguments_.action) {
+				case "start":
+					return startProcess(
+						options,
+						arguments_.command,
+						arguments_.timeoutMs,
+						arguments_.sandbox_permissions,
+						context,
+					);
+				case "poll": {
+					const processId = requiredProcessId("poll", arguments_.processId);
+					if (typeof processId !== "string") return processId;
+					context.signal.throwIfAborted();
+					return snapshotOutput(await options.manager.poll(processId), true);
+				}
+				case "write": {
+					const processId = requiredProcessId("write", arguments_.processId);
+					if (typeof processId !== "string") return processId;
+					if (typeof arguments_.input !== "string") {
+						return processToolFailure("process action=write requires input", {
+							code: "invalid_arguments",
+							action: "write",
+						});
+					}
+					context.signal.throwIfAborted();
+					const result = await options.manager.write(processId, arguments_.input, arguments_.closeStdin ?? false);
+					if (result.accepted) {
+						const output = snapshotOutput(result.snapshot, false);
+						return {
+							...output,
+							content: `Wrote ${Buffer.byteLength(arguments_.input)} bytes to process ${processId}${arguments_.closeStdin ? " and closed stdin" : ""}.`,
+						};
+					}
+					return {
+						content: `Could not write to process ${processId}: ${result.reason ?? "process is unavailable"}`,
+						observation: {
+							status: "error",
+							truncated: false,
+							facts: snapshotFacts(result.snapshot),
 						},
-					},
-					details: { state: "failed", code: "launch_failed", error: message },
-				};
+						details: { ...result.snapshot, writeAccepted: false, reason: result.reason },
+					};
+				}
+				case "stop": {
+					const processId = requiredProcessId("stop", arguments_.processId);
+					if (typeof processId !== "string") return processId;
+					context.signal.throwIfAborted();
+					return snapshotOutput(await options.manager.stop(processId), true);
+				}
 			}
 		},
 	};
-	const poll: AgentTool<typeof ProcessIdentityParameters> = {
-		name: "process_poll",
-		description: "Read the next bounded stdout/stderr increment and current state for a background process.",
-		parameters: ProcessIdentityParameters,
-		replaySafety: "never",
-		execute: async ({ processId }, context) => {
-			context.signal.throwIfAborted();
-			return snapshotOutput(await options.manager.poll(processId), true);
-		},
-	};
-	const write: AgentTool<typeof ProcessWriteParameters> = {
-		name: "process_write",
-		description: "Write bytes to a running background process and optionally close its stdin.",
-		parameters: ProcessWriteParameters,
-		replaySafety: "never",
-		execute: async ({ processId, input, closeStdin }, context) => {
-			context.signal.throwIfAborted();
-			const result = await options.manager.write(processId, input, closeStdin ?? false);
-			if (result.accepted) {
-				const output = snapshotOutput(result.snapshot, false);
-				return {
-					...output,
-					content: `Wrote ${Buffer.byteLength(input)} bytes to process ${processId}${closeStdin ? " and closed stdin" : ""}.`,
-				};
-			}
-			return {
-				content: `Could not write to process ${processId}: ${result.reason ?? "process is unavailable"}`,
-				observation: {
-					status: "error",
-					truncated: false,
-					facts: snapshotFacts(result.snapshot),
+}
+
+async function startProcess(
+	options: {
+		readonly workspace: Workspace;
+		readonly manager: ProcessSessionManager;
+		readonly shellExecutable: string;
+		readonly runtime: HostProcessRuntime;
+		readonly sessionId: string;
+		readonly wrapScript?: (
+			request: Parameters<ProcessConfinement["wrapScript"]>[0],
+		) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
+	},
+	command: string | undefined,
+	timeoutMs: number | undefined,
+	sandboxPermissions: "use_default" | "require_escalated" | "with_additional_permissions" | undefined,
+	context: Parameters<AgentTool["execute"]>[1],
+): Promise<ToolExecutionOutput> {
+	if (typeof command !== "string" || command.length === 0) {
+		return processToolFailure("process action=start requires command", {
+			code: "invalid_arguments",
+			action: "start",
+		});
+	}
+	const environment = hostProcessEnvironment(options.runtime);
+	try {
+		const confined =
+			options.wrapScript && sandboxPermissions !== "require_escalated"
+				? await options.wrapScript({
+						command,
+						shell: options.shellExecutable,
+						cwd: options.workspace.root,
+						environment,
+						commandId: String(context.invocationId),
+					})
+				: undefined;
+		const spawn = confined ?? {
+			executable: options.shellExecutable,
+			args: ["-c", command] as const,
+			environment,
+		};
+		const snapshot = await options.manager.start(
+			{
+				executable: spawn.executable,
+				args: [...spawn.args],
+				cwd: options.workspace.root,
+				environment: spawn.environment,
+				signal: context.signal,
+				timeoutMs: timeoutMs ?? 3_600_000,
+			},
+			options.sessionId,
+		);
+		return snapshotOutput(snapshot, false, { retainLease: snapshot.state === "running" });
+	} catch (error) {
+		context.signal.throwIfAborted();
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			content: `Process failed to start: ${message}`,
+			observation: {
+				status: "error",
+				truncated: false,
+				facts: {
+					state: "failed",
+					code: "launch_failed",
 				},
-				details: { ...result.snapshot, writeAccepted: false, reason: result.reason },
-			};
-		},
-	};
-	const stop: AgentTool<typeof ProcessIdentityParameters> = {
-		name: "process_stop",
-		description: "Stop a background process and all descendants, returning its final bounded output increment.",
-		parameters: ProcessIdentityParameters,
-		replaySafety: "never",
-		execute: async ({ processId }, context) => {
-			context.signal.throwIfAborted();
-			return snapshotOutput(await options.manager.stop(processId), true);
-		},
-	};
-	return Object.freeze([start, poll, write, stop]);
+			},
+			details: { state: "failed", code: "launch_failed", error: message },
+		};
+	}
 }

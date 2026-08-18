@@ -28,7 +28,8 @@ export function createWriteTool(
 ): AgentTool<typeof WriteParameters> {
 	return {
 		name: "write",
-		description: "Create or atomically overwrite a UTF-8 text file in the Workspace.",
+		description:
+			"Create a UTF-8 text file, or replace an entire existing file in one shot. Use edit to change part of an existing file.",
 		parameters: WriteParameters,
 		replaySafety: "never",
 		execute: async (arguments_, context) => {

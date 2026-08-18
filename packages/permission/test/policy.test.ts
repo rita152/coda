@@ -3,8 +3,9 @@ import {
 	commandPermissionKey,
 	createCommandPermissionPolicy,
 	NEVER_PROMPT_REASON,
-	PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
-	PATCH_REJECTED_READ_ONLY_REASON,
+	requestsSandboxOverride,
+	WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
+	WRITE_REJECTED_READ_ONLY_REASON,
 } from "../src/index.ts";
 
 const workspace = "/workspace";
@@ -38,6 +39,18 @@ describe("Command Permission policy", () => {
 			kind: "ask",
 			prompt: "Allow write?\nsecrets.env",
 		});
+		expect(policy.decide(request("process", { action: "poll", processId: "process:1" }))).toEqual({ kind: "allow" });
+		expect(policy.decide(request("process", { action: "start", command: "npm test" }))).toEqual({
+			kind: "ask",
+			prompt: "Allow process?\nnpm test",
+		});
+		expect(
+			policy.decide(request("bash", { command: "curl example.test", sandbox_permissions: "require_escalated" })),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is UnlessTrusted; reject command — you should not ask for escalated permissions if the approval policy is UnlessTrusted",
+		});
 	});
 
 	it("under on-request lets the sandbox enforce restricted Shell and only asks for danger or escalation", () => {
@@ -52,7 +65,9 @@ describe("Command Permission policy", () => {
 			kind: "ask",
 			prompt: "Allow bash?\nrm -rf /tmp/example",
 		});
-		expect(restricted.decide(request("bash", { command: "curl example.test" }, { sandboxOverride: true }))).toEqual({
+		expect(
+			restricted.decide(request("bash", { command: "curl example.test", sandbox_permissions: "require_escalated" })),
+		).toEqual({
 			kind: "ask",
 			prompt: "Allow bash?\ncurl example.test",
 		});
@@ -92,7 +107,14 @@ describe("Command Permission policy", () => {
 		expect(restricted.decide(request("write", { path: "src/app.ts" }))).toEqual({ kind: "allow" });
 		expect(restricted.decide(request("write", { path: "/etc/passwd" }))).toEqual({
 			kind: "deny",
-			reason: PATCH_REJECTED_OUTSIDE_PROJECT_REASON,
+			reason: WRITE_REJECTED_OUTSIDE_PROJECT_REASON,
+		});
+		expect(
+			restricted.decide(request("bash", { command: "curl example.test", sandbox_permissions: "require_escalated" })),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is Never; reject command — you should not ask for escalated permissions if the approval policy is Never",
 		});
 
 		const readOnly = createCommandPermissionPolicy({
@@ -102,7 +124,7 @@ describe("Command Permission policy", () => {
 		});
 		expect(readOnly.decide(request("write", { path: "src/app.ts" }))).toEqual({
 			kind: "deny",
-			reason: PATCH_REJECTED_READ_ONLY_REASON,
+			reason: WRITE_REJECTED_READ_ONLY_REASON,
 		});
 	});
 
@@ -145,5 +167,149 @@ describe("Command Permission policy", () => {
 		const bash = request("bash", { command: "curl evil.test" });
 		policy.remember(bash, { kind: "deny", reason: "blocked by user", remember: "user" });
 		expect(policy.decide(bash)).toEqual({ kind: "deny", reason: "blocked by user" });
+	});
+
+	it("treats quoted forced rm as dangerous instead of known-safe", () => {
+		const quoted = request("bash", { command: 'echo "$(rm -rf /tmp/example)"' });
+		expect(createCommandPermissionPolicy({ approvalPolicy: "untrusted" }).decide(quoted)).toEqual({
+			kind: "ask",
+			prompt: 'Allow bash?\necho "$(rm -rf /tmp/example)"',
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "unrestricted" }).decide(
+				quoted,
+			),
+		).toEqual({
+			kind: "ask",
+			prompt: 'Allow bash?\necho "$(rm -rf /tmp/example)"',
+		});
+		expect(createCommandPermissionPolicy({ approvalPolicy: "never" }).decide(quoted)).toEqual({
+			kind: "deny",
+			reason: NEVER_PROMPT_REASON,
+		});
+	});
+
+	it("asks or denies in-workspace writes when restricted filesystem is not enforced", () => {
+		const write = request("write", { path: "src/app.ts" });
+		const onRequest = createCommandPermissionPolicy({
+			approvalPolicy: "on-request",
+			filesystemAccess: "restricted",
+			writableRoots: [workspace],
+			filesystemEnforced: false,
+		});
+		expect(onRequest.decide(write)).toEqual({ kind: "ask", prompt: "Allow write?\nsrc/app.ts" });
+		const never = createCommandPermissionPolicy({
+			approvalPolicy: "never",
+			filesystemAccess: "restricted",
+			writableRoots: [workspace],
+			filesystemEnforced: false,
+		});
+		expect(never.decide(write)).toEqual({ kind: "deny", reason: WRITE_REJECTED_OUTSIDE_PROJECT_REASON });
+		expect(onRequest.decide(request("bash", { command: "npm test" }))).toEqual({
+			kind: "ask",
+			prompt: "Allow bash?\nnpm test",
+		});
+		expect(never.decide(request("bash", { command: "npm test" }))).toEqual({
+			kind: "deny",
+			reason: NEVER_PROMPT_REASON,
+		});
+		expect(onRequest.decide(request("bash", { command: "ls" }))).toEqual({ kind: "allow" });
+	});
+
+	it("maps Codex sandbox_permissions wire names onto sandboxOverride", () => {
+		expect(requestsSandboxOverride({ command: "curl example.test" })).toBe(false);
+		expect(requestsSandboxOverride({ command: "curl example.test", sandbox_permissions: "use_default" })).toBe(false);
+		expect(requestsSandboxOverride({ command: "curl example.test", sandbox_permissions: "require_escalated" })).toBe(
+			true,
+		);
+		expect(
+			requestsSandboxOverride({
+				command: "curl example.test",
+				sandbox_permissions: "with_additional_permissions",
+			}),
+		).toBe(true);
+	});
+
+	it("rejects Codex with_additional_permissions unless on-request and additional_permissions are present", () => {
+		const extra = {
+			command: "curl example.test",
+			sandbox_permissions: "with_additional_permissions",
+			additional_permissions: { network: { enabled: true } },
+		};
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", extra),
+			),
+		).toEqual({
+			kind: "ask",
+			prompt: "Allow bash?\ncurl example.test",
+		});
+		expect(createCommandPermissionPolicy({ approvalPolicy: "never" }).decide(request("bash", extra))).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is Never; reject command — you cannot request additional permissions unless the approval policy is OnRequest",
+		});
+		expect(createCommandPermissionPolicy({ approvalPolicy: "untrusted" }).decide(request("bash", extra))).toEqual({
+			kind: "deny",
+			reason:
+				"approval policy is UnlessTrusted; reject command — you cannot request additional permissions unless the approval policy is OnRequest",
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", { command: "curl example.test", sandbox_permissions: "with_additional_permissions" }),
+			),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"missing `additional_permissions`; provide at least one of `network` or `file_system` when using `with_additional_permissions`",
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", {
+					command: "curl example.test",
+					sandbox_permissions: "with_additional_permissions",
+					additional_permissions: {},
+				}),
+			),
+		).toEqual({
+			kind: "deny",
+			reason:
+				"`additional_permissions` must include at least one requested permission in `network` or `file_system`",
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", {
+					command: "curl example.test",
+					additional_permissions: { network: { enabled: true } },
+				}),
+			),
+		).toEqual({
+			kind: "deny",
+			reason: "`additional_permissions` requires `sandbox_permissions` set to `with_additional_permissions`",
+		});
+	});
+
+	it("rejects justification without sandbox_permissions and includes it on require_escalated prompts", () => {
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", { command: "ls", justification: "Allow this command" }),
+			),
+		).toEqual({
+			kind: "deny",
+			reason:
+				'`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: "require_escalated"` for unsandboxed execution, or omit `justification`.',
+		});
+		expect(
+			createCommandPermissionPolicy({ approvalPolicy: "on-request", filesystemAccess: "restricted" }).decide(
+				request("bash", {
+					command: "curl example.test",
+					sandbox_permissions: "require_escalated",
+					justification: "needs network",
+				}),
+			),
+		).toEqual({
+			kind: "ask",
+			prompt: "Allow bash?\ncurl example.test\nneeds network",
+		});
 	});
 });
