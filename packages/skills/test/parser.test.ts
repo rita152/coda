@@ -128,7 +128,7 @@ describe("Agent Skills parsing", () => {
 		expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: "yaml-depth-exceeded" }));
 	});
 
-	it("ignores non-standard fields at runtime and rejects them during strict validation", () => {
+	it("retains invocation-policy booleans while still reporting them as unknown fields", () => {
 		const result = parseAgentSkill({
 			text: [
 				"---",
@@ -158,6 +158,7 @@ describe("Agent Skills parsing", () => {
 			name: "standard-only",
 			description: "A portable Agent Skill",
 			metadata: {},
+			disableModelInvocation: true,
 		});
 		expect(result.diagnostics.filter(({ code }) => code === "unknown-field")).toHaveLength(2);
 		expect(strict.valid).toBe(false);

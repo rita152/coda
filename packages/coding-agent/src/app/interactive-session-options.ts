@@ -6,6 +6,7 @@ import type { Scheduler } from "@coda/tui";
 import type { ModelCommandEntry } from "../commands/model-flow.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
+import type { CodingMcpRegistry } from "../mcp/registry.ts";
 import type { McpAgentElicitation } from "../mcp/run-capability.ts";
 import { MediaLibrary } from "../media/media-library.ts";
 import type { ModelCapabilityResolver } from "../models/model-capabilities.ts";
@@ -20,13 +21,6 @@ import type { SessionWorkController, SessionWorkSelection } from "../runtime/ses
 import type { WorkspaceInputResources } from "../runtime/workspace-input-resources.ts";
 import type { WorkspaceWorkCoordinator } from "../runtime/workspace-work-coordinator.ts";
 import type { Session } from "../session/types.ts";
-import {
-	activateExplicitSkillReferences,
-	prependSkillContext,
-	renderExplicitSkillContext,
-	renderExplicitSkillReferences,
-	sharedSkillArguments,
-} from "../skills/context.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import { type ActivitySummaryMode, activitySummaryModeForApi } from "../ui/activity-status.ts";
@@ -38,12 +32,12 @@ import {
 	openPathInSystemViewer,
 	pathSafeIdentity,
 	prepareAttachmentTransaction,
-	promptInput,
 	type RestoredChatMedia,
 	restoredChatAttachments,
 } from "./media-attachments.ts";
+import { prepareUserPrompt } from "./prepare-user-prompt.ts";
 import { createSessionPresentation } from "./session-presentation.ts";
-import { assertSkillReferencesAvailable } from "./trust-gating.ts";
+import { assertExtensionReferencesAvailable } from "./trust-gating.ts";
 
 export interface InteractiveSessionApplicationOptions {
 	readonly models: MutableModels;
@@ -153,6 +147,7 @@ export interface CreateInteractiveSessionOptionsInput {
 	readonly permissionsCommand: NonNullable<InteractiveSessionOptions["permissionsCommand"]>;
 	readonly skillsManager: CodingSkillsManager;
 	readonly skillsSnapshot: CodingSkillsSnapshot;
+	readonly mcpRegistry?: CodingMcpRegistry;
 	readonly inputResources: WorkspaceInputResources;
 	readonly options: InteractiveSessionApplicationOptions;
 	readonly workspace: string;
@@ -187,7 +182,7 @@ export function createInteractiveSessionOptions(
 		permissionsCommand: input.permissionsCommand,
 		reasoning: input.reasoning,
 		restoredAttachments: input.restoredMedia.attachments,
-		resolveExtensionReferences: createExtensionReferenceResolver(input.skillsManager),
+		resolveExtensionReferences: createExtensionReferenceResolver(input.skillsManager, input.mcpRegistry),
 		buildPrompt: createPromptBuilder(input),
 		prepareAttachments,
 		...mediaHandlers,
@@ -278,44 +273,33 @@ function selectedModelAuth(
 
 function createExtensionReferenceResolver(
 	skillsManager: CodingSkillsManager,
+	mcpRegistry: CodingMcpRegistry | undefined,
 ): NonNullable<InteractiveSessionOptions["resolveExtensionReferences"]> {
 	return async (references) => {
 		const snapshot = await skillsManager.refresh({ rescan: false });
-		assertSkillReferencesAvailable(snapshot, references);
+		assertExtensionReferencesAvailable(snapshot, mcpRegistry?.snapshot().tools ?? [], references);
 	};
 }
 
 function createPromptBuilder(
 	input: Pick<
 		CreateInteractiveSessionOptionsInput,
-		"work" | "mediaLibrary" | "restoredMedia" | "skillsManager" | "skillsSnapshot"
+		"work" | "mediaLibrary" | "restoredMedia" | "skillsManager" | "skillsSnapshot" | "mcpRegistry"
 	>,
 ): NonNullable<InteractiveSessionOptions["buildPrompt"]> {
 	return async (text, attachmentIds, inputContext) => {
 		const selectedModel = input.work.state().selection.model;
 		assertModelSupportsImages(selectedModel, attachmentIds.length);
-		const skillReferences = inputContext.references.filter(({ source }) => source === "skill");
-		if (skillReferences.length === 0) {
-			return promptInput(text, attachmentIds, input.mediaLibrary, input.restoredMedia.contents);
-		}
 		const snapshot = input.skillsManager.current ?? input.skillsSnapshot;
-		assertSkillReferencesAvailable(snapshot, inputContext.references);
-		const taskText = sharedSkillArguments(inputContext.composerText, skillReferences) ?? "";
-		const preparedInput = await promptInput(
-			taskText,
-			attachmentIds,
-			input.mediaLibrary,
-			input.restoredMedia.contents,
-		);
-		const activations = await activateExplicitSkillReferences({
-			snapshot,
-			references: skillReferences,
+		return prepareUserPrompt({
+			text,
 			composerText: inputContext.composerText,
+			references: inputContext.references,
+			attachmentIds,
+			mediaLibrary: input.mediaLibrary,
+			restoredContents: input.restoredMedia.contents,
+			skills: snapshot,
+			...(input.mcpRegistry ? { mcpRegistry: input.mcpRegistry } : {}),
 		});
-		return prependSkillContext(
-			preparedInput,
-			renderExplicitSkillContext(activations),
-			renderExplicitSkillReferences(activations),
-		);
 	};
 }

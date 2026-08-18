@@ -1,5 +1,6 @@
 import type { SkillFileSystem, SkillRoot, Skills } from "@coda/skills";
 import { createSkills } from "@coda/skills";
+import { readSidecarImplicitInvocation } from "./invocation.ts";
 import { createCodingSkillsSnapshot } from "./snapshot.ts";
 import type { CodingSkillOrigin, CodingSkillsSnapshot } from "./types.ts";
 
@@ -11,6 +12,7 @@ export interface CodingSkillsManagerOptions {
 
 export class CodingSkillsManager {
 	readonly #runtime: Skills<CodingSkillOrigin>;
+	readonly #fileSystem: SkillFileSystem;
 	readonly #roots: readonly SkillRoot<CodingSkillOrigin>[];
 	#current?: CodingSkillsSnapshot;
 	#dirty = true;
@@ -19,6 +21,7 @@ export class CodingSkillsManager {
 	readonly #refreshes = new Map<number, Promise<CodingSkillsSnapshot>>();
 
 	constructor(options: CodingSkillsManagerOptions) {
+		this.#fileSystem = options.fileSystem;
 		this.#runtime = createSkills<CodingSkillOrigin>({
 			fileSystem: options.fileSystem,
 			...(options.limits ? { limits: options.limits } : {}),
@@ -55,8 +58,13 @@ export class CodingSkillsManager {
 		if (!operation) {
 			operation = this.#runtime
 				.snapshot({ roots: this.#roots, profile: "compatible" })
-				.then((loader) => {
-					const snapshot = createCodingSkillsSnapshot({ loader });
+				.then(async (loader) => {
+					const implicitInvocationById = await readSidecarImplicitInvocation(this.#fileSystem, loader.candidates);
+					const snapshot = createCodingSkillsSnapshot({
+						loader,
+						roots: this.#roots,
+						implicitInvocationById,
+					});
 					if (generation >= this.#publishedGeneration) {
 						this.#current = snapshot;
 						this.#publishedGeneration = generation;

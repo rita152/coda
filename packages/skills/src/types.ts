@@ -129,6 +129,10 @@ export interface AgentSkillMetadata {
 	readonly compatibility?: string;
 	readonly metadata: Readonly<Record<string, string>>;
 	readonly allowedTools?: string;
+	/** Retained non-standard field; still reported as `unknown-field`. */
+	readonly disableModelInvocation?: boolean;
+	/** Retained non-standard field; still reported as `unknown-field`. */
+	readonly userInvocable?: boolean;
 }
 
 export interface ParsedAgentSkill {

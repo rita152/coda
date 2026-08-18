@@ -12,6 +12,9 @@ describe("createUnifiedCommandRegistry", () => {
 			expect.objectContaining({ id: "skill:review", source: "skill", kind: "extension" }),
 			expect.objectContaining({ id: "mcp:review", source: "mcp", kind: "extension" }),
 		]);
+		expect(
+			registry.search("review", { location: "token_boundary", trigger: "$" }).map(({ command }) => command.id),
+		).toEqual(["skill:review", "mcp:review"]);
 		expect(registry.search("mo", { location: "composer_start" })[0]?.command.id).toBe("core:model");
 		expect(registry.search("eff", { location: "composer_start" })[0]?.command.id).toBe("core:effort");
 	});

@@ -213,7 +213,7 @@ describe("Coding Agent image attachments", () => {
 		]);
 
 		await expect(
-			fixture.application.run(["--print", "--json", "--model", fixture.model, "capture image"]),
+			fixture.application.run(["--print", "--json", "--model", fixture.model, "$screenshot capture image"]),
 		).resolves.toBe(0);
 		const events = fixture.stdout.value
 			.trimEnd()

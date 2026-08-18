@@ -85,7 +85,7 @@ The executable Model driver, Tools, deterministic prompt contributions, and exac
 _Avoid_: capability snapshot, live registry, generic plugin container
 
 **Desired Runtime Configuration**:
-The mutable selection intended for the next Run of one Worker Runtime; changes never alter its active Prepared Run.
+The mutable selection intended for the next Run of one Worker Runtime; changes never alter its active Prepared Run. A child Work Item inherits omitted fields from its parent, and inherits the parent Model when a requested Model cannot be resolved.
 _Avoid_: Prepared Run, global selected Model
 
 **Run**:
@@ -208,6 +208,10 @@ _Avoid_: Tool Snapshot, MCP Server Definition, Model Catalog
 The immutable model-visible projection of one MCP Tool Catalog frozen for a Run.
 _Avoid_: MCP Tool Catalog, live Server state
 
+**MCP Mention**:
+An explicit `$name` token that admits one MCP Tool or every Tool from one MCP Server into this Run's MCP Tool Snapshot.
+_Avoid_: auto-exposed MCP Tool, Slash MCP, plugin invocation
+
 **MCP Elicitation**:
 A Server-identified request for explicit user input while an MCP Tool Invocation is active, answered with accept, decline, or cancel.
 _Avoid_: model prompt, OAuth callback
@@ -285,12 +289,16 @@ The immutable set of resolved Skill Candidates and name resolutions frozen for o
 _Avoid_: Skill Inventory, watcher cache
 
 **Skill Catalog**:
-The bounded model-visible projection of one Skill Snapshot containing invocation identity and discovery metadata but not Skill bodies.
+The bounded model-visible projection of one Skill Snapshot: Skills that allow implicit invocation, listed with name, description, and a `SKILL.md` locator, without Skill bodies. Slash-only Skills stay in the Composer `$` palette and can be `$`-injected.
 _Avoid_: Model Catalog, Skill Inventory
 
 **Skill Activation**:
 The exact-revision Skill body, base directory, arguments, and bounded resource references loaded through an explicit user reference or model Tool Invocation.
 _Avoid_: script execution, Skill Catalog, Tool execution
+
+**Skill Mention**:
+An explicit `$name` token that selects a Skill for this Run's user-selected context.
+_Avoid_: Slash Skill, auto-loaded Skill body, @skill
 
 **Prompt Builder**:
 The versioned private Worker Runtime component that deterministically assembles one Run's System Prompt from Run Capability contributions, Workspace facts, and trusted project instructions.

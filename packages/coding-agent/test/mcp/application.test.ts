@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@coda/ai";
 import type { McpConnection, McpConnector } from "@coda/mcp";
 import { afterEach, describe, expect, it } from "vitest";
@@ -21,7 +24,7 @@ afterEach(async () => {
 });
 
 describe("MCP application composition", () => {
-	it("discovers an MCP Tool, freezes it into the Run, and returns its result", async () => {
+	it("discovers an MCP Tool, admits it after a `$` mention, and returns its result", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-mcp-application-"));
 		temporaryDirectories.push(workspace);
 		const runtime = testTimeRuntime(500);
@@ -90,15 +93,83 @@ describe("MCP application composition", () => {
 			"--print",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
-			"search docs",
+			"Use $search to look up MCP",
 		]);
 		expect({ exitCode, stderr: stderr.value }).toEqual({ exitCode: 0, stderr: "" });
 		expect(stdout.value).toBe("used external docs\n");
 		expect(calls).toEqual([{ name: "search", arguments: { query: "MCP" } }]);
 		expect(faux.state.callCount).toBe(2);
 	});
-});
 
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+	it("does not freeze MCP Tools into a Run without a `$` mention", async () => {
+		const workspace = await mkdtemp(join(tmpdir(), "coda-mcp-application-absent-"));
+		temporaryDirectories.push(workspace);
+		const runtime = testTimeRuntime(500);
+		const faux = fauxProvider({ runtime });
+		faux.setResponses([
+			(context) => {
+				expect(context.tools?.some(({ name }) => name.startsWith("mcp__"))).toBe(false);
+				return fauxAssistantMessage("CODA_MCP_ABSENT", { timestamp: 500 });
+			},
+		]);
+		const models = createModels({ runtime });
+		models.setProvider(faux.provider);
+		const connection: McpConnection = {
+			info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+			listTools: async () => [
+				{
+					name: "search",
+					description: "Search external docs",
+					inputSchema: {
+						type: "object",
+						properties: { query: { type: "string" } },
+						required: ["query"],
+					},
+				},
+			],
+			callTool: async () => {
+				throw new Error("MCP Tool must not run without a $ mention");
+			},
+			close: async () => undefined,
+		};
+		const connector: McpConnector = { connect: async () => connection };
+		const stdout = new BufferOutput();
+		const stderr = new BufferOutput();
+		let id = 0;
+		const application = createCodingAgentApplication({
+			models,
+			mcpConnector: connector,
+			settings: {
+				load: async () => ({
+					mcpServers: [
+						{
+							id: "docs",
+							transport: { kind: "http", url: "https://docs.example.test/mcp" },
+						},
+					],
+				}),
+				save: async () => undefined,
+			},
+			fileSystem: createNodeFileSystem(),
+			processRunner: createNodeProcessRunner({ platform: "darwin" }),
+			io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+			runtime: {
+				cwd: workspace,
+				homeDirectory: workspace,
+				platform: "darwin",
+				environment: {},
+				clock: runtime.clock,
+				idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			},
+		});
+
+		const exitCode = await application.run([
+			"--print",
+			"--model",
+			`${faux.getModel().provider}/${faux.getModel().id}`,
+			"search docs",
+		]);
+		expect({ exitCode, stderr: stderr.value }).toEqual({ exitCode: 0, stderr: "" });
+		expect(stdout.value).toBe("CODA_MCP_ABSENT\n");
+	});
+});

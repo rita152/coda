@@ -457,11 +457,17 @@ async function harness(
 	const sessions = overrides.sessions ?? new MemorySessions();
 	const workspace = overrides.workspace ?? new MemoryWorkspaceExecution();
 	const modelProvider: OpenCodingAgentOptions["modelProvider"] = {
-		resolve: (configuration) => ({
-			model: faux.getModel(configuration.model.id)!,
-			reasoning: configuration.reasoning,
-			authSnapshot: { auth: {} },
-		}),
+		resolve: (configuration) => {
+			const model = faux.getModel(configuration.model.id);
+			if (!model) {
+				throw new Error(`Model is unavailable: ${configuration.model.provider}/${configuration.model.id}`);
+			}
+			return {
+				model,
+				reasoning: configuration.reasoning,
+				authSnapshot: { auth: {} },
+			};
+		},
 		lease: (selection) => ({
 			model: selection.model,
 			revision: `test:${selection.model.id}`,
@@ -509,6 +515,11 @@ function delegationMessage(
 		readonly objective: string;
 		readonly executionMode: "read_only" | "write";
 		readonly dependencies?: readonly string[];
+		readonly configuration?: {
+			readonly model?: { readonly provider: string; readonly id: string };
+			readonly reasoning?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+			readonly runLimits?: { readonly maxTurns?: number };
+		};
 	}[],
 ) {
 	return fauxAssistantMessage([fauxToolCall("delegate", { items }, { id })], {
@@ -886,6 +897,142 @@ describe("Work Graph public Interface", () => {
 		expect(modelContexts.join("\n")).toContain('"itemId":"child"');
 		expect(modelContexts.join("\n")).toContain('"itemId":"grandchild"');
 		expect(workspace.boundToolNames).toEqual([["delegate"], ["delegate"], ["delegate"]]);
+		await agent.close();
+	});
+
+	it("inherits the parent Work Item model when delegated children request an unavailable model", async () => {
+		const { agent, modelCalls } = await harness([
+			{
+				message: delegationMessage("delegate:unavailable-model", [
+					{
+						itemId: "child",
+						objective: "analyze architecture",
+						executionMode: "read_only",
+						configuration: {
+							model: { provider: "openai", id: "gpt-5.2" },
+							reasoning: "high",
+						},
+					},
+				]),
+			},
+			{},
+			{},
+		]);
+		await agent.submit({ commands: [start("graph:inherit-unavailable-model", 1)] });
+		await waitForState(agent, "graph:inherit-unavailable-model", "child", "succeeded");
+		const iterator = agent.observe()[Symbol.asyncIterator]();
+		const snapshot = (await iterator.next()).value as Extract<CodingAgentObservation, { type: "snapshot" }>;
+		expect(snapshot.snapshot.graphs[0]?.items.find(({ itemId }) => itemId === "child")?.desiredConfiguration).toEqual(
+			{
+				model: { provider: "work", id: "one" },
+				reasoning: "high",
+			},
+		);
+		await iterator.return?.();
+		const result = await waitForGraphResult(agent, "graph:inherit-unavailable-model");
+		expect(result.outcome).toBe("succeeded");
+		expect(result.results.map(({ itemId, state }) => [itemId, state])).toEqual([
+			["root", "succeeded"],
+			["child", "succeeded"],
+		]);
+		expect(modelCalls).toEqual(["one", "one", "one"]);
+		await agent.close();
+	});
+
+	it("lets delegated children omit a model and inherit the parent Work Item model", async () => {
+		const { agent, modelCalls } = await harness([
+			{
+				message: delegationMessage("delegate:omit-model", [
+					{
+						itemId: "child",
+						objective: "analyze architecture",
+						executionMode: "read_only",
+						configuration: { reasoning: "high" },
+					},
+				]),
+			},
+			{},
+			{},
+		]);
+		await agent.submit({ commands: [start("graph:inherit-omitted-model", 1)] });
+		const result = await waitForGraphResult(agent, "graph:inherit-omitted-model");
+		expect(result.outcome).toBe("succeeded");
+		expect(result.results.map(({ itemId, state }) => [itemId, state])).toEqual([
+			["root", "succeeded"],
+			["child", "succeeded"],
+		]);
+		expect(modelCalls).toEqual(["one", "one", "one"]);
+		await agent.close();
+	});
+
+	it("still rejects a root Work Item whose model is unavailable", async () => {
+		const { agent } = await harness([]);
+		await expect(
+			agent.submit({
+				commands: [
+					{
+						...start("graph:unavailable-root", 1),
+						configuration: { model: { provider: "openai", id: "gpt-5.2" }, reasoning: "off" },
+					},
+				],
+			}),
+		).resolves.toMatchObject({
+			status: "rejected",
+			rejection: {
+				code: "resource_reservation_failed",
+				message: "Runtime configuration failed: Model is unavailable: openai/gpt-5.2",
+			},
+		});
+		await agent.close();
+	});
+
+	it("still rejects configure_work_item when the requested model is unavailable", async () => {
+		const run = deferred();
+		const { agent } = await harness([{ gate: run.promise }]);
+		await agent.submit({ commands: [start("graph:unavailable-configure", 1)] });
+		await waitForState(agent, "graph:unavailable-configure", "root", "running");
+		await expect(
+			agent.submit({
+				commands: [
+					{
+						type: "configure_work_item",
+						graphId: "graph:unavailable-configure",
+						itemId: "root",
+						configuration: { model: { provider: "openai", id: "gpt-5.2" }, reasoning: "high" },
+					},
+				],
+			}),
+		).resolves.toMatchObject({
+			status: "rejected",
+			rejection: {
+				code: "resource_reservation_failed",
+				message: "Runtime configuration failed: Model is unavailable: openai/gpt-5.2",
+			},
+		});
+		run.resolve();
+		await waitForGraphResult(agent, "graph:unavailable-configure");
+		await agent.close();
+	});
+
+	it("uses an available child model instead of inheriting the parent", async () => {
+		const { agent, modelCalls } = await harness([
+			{
+				message: delegationMessage("delegate:available-child-model", [
+					{
+						itemId: "child",
+						objective: "use a different available model",
+						executionMode: "read_only",
+						configuration: { model: { provider: "work", id: "two" }, reasoning: "off" },
+					},
+				]),
+			},
+			{},
+			{},
+		]);
+		await agent.submit({ commands: [start("graph:available-child-model", 1)] });
+		const result = await waitForGraphResult(agent, "graph:available-child-model");
+		expect(result.outcome).toBe("succeeded");
+		expect(modelCalls).toEqual(["one", "two", "one"]);
 		await agent.close();
 	});
 

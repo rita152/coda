@@ -1,4 +1,5 @@
-import type { SkillCandidate, SkillId, SkillsSnapshot } from "@coda/skills";
+import type { SkillCandidate, SkillId, SkillRoot, SkillsSnapshot } from "@coda/skills";
+import { allowsImplicitInvocation } from "./invocation.ts";
 import type { CodingSkillDiagnostic, CodingSkillOrigin, CodingSkillsSnapshot, ResolvedCodingSkill } from "./types.ts";
 
 function compareText(left: string, right: string): number {
@@ -80,6 +81,8 @@ function selectedOrigin(candidate: SkillCandidate<CodingSkillOrigin>): CodingSki
 
 export function createCodingSkillsSnapshot(options: {
 	readonly loader: SkillsSnapshot<CodingSkillOrigin>;
+	readonly roots?: readonly SkillRoot<CodingSkillOrigin>[];
+	readonly implicitInvocationById?: ReadonlyMap<SkillId, boolean>;
 }): CodingSkillsSnapshot {
 	const preliminary = options.loader.candidates.flatMap((candidate) => {
 		const origin = selectedOrigin(candidate);
@@ -120,6 +123,10 @@ export function createCodingSkillsSnapshot(options: {
 						: qualifiedName(entry.candidate, entry.origin, 32),
 				winner: index === 0,
 				collisionCount: group.length,
+				implicitInvocation: allowsImplicitInvocation({
+					disableModelInvocation: entry.candidate.metadata.disableModelInvocation,
+					sidecarAllowImplicit: options.implicitInvocationById?.get(entry.candidate.id),
+				}),
 			}),
 		);
 		resolvedSkills.push(...resolved);
@@ -137,6 +144,7 @@ export function createCodingSkillsSnapshot(options: {
 	);
 	return Object.freeze({
 		loader: options.loader,
+		roots: Object.freeze([...(options.roots ?? [])]),
 		candidates: options.loader.candidates,
 		resolved: Object.freeze(resolvedSkills),
 		byId,

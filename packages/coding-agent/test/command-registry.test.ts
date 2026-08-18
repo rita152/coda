@@ -36,10 +36,10 @@ describe("CommandRegistry", () => {
 
 		expect(
 			registry.search("mo", { location: "composer_start", trigger: "/" }).map(({ command: match }) => match.id),
-		).toEqual(["core:model", "mcp:module"]);
+		).toEqual(["core:model"]);
 		expect(
 			registry.search("mo", { location: "composer_start", trigger: "$" }).map(({ command: match }) => match.id),
-		).toEqual(["skill:model"]);
+		).toEqual(["skill:model", "mcp:module"]);
 	});
 });
 

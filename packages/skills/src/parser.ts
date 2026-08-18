@@ -290,6 +290,31 @@ function optionalString(
 	return undefined;
 }
 
+function optionalBoolean(
+	record: Readonly<Record<string, unknown>>,
+	field: string,
+	diagnostics: MutableDiagnostic[],
+	path: string | undefined,
+	strict: boolean,
+): boolean | undefined {
+	const value = record[field];
+	if (value === undefined) return undefined;
+	if (typeof value === "boolean") return value;
+	diagnostics.push(
+		diagnostic(
+			"invalid-field",
+			strict ? "error" : "warning",
+			strict ? "validate" : "parse",
+			`${field} must be a boolean`,
+			{
+				path,
+				field,
+			},
+		),
+	);
+	return undefined;
+}
+
 function metadataField(
 	record: Readonly<Record<string, unknown>>,
 	diagnostics: MutableDiagnostic[],
@@ -480,6 +505,8 @@ function compatibleSkill(
 		);
 	}
 	const allowedTools = optionalString(record, "allowed-tools", diagnostics, input.path, false);
+	const disableModelInvocation = optionalBoolean(record, "disable-model-invocation", diagnostics, input.path, false);
+	const userInvocable = optionalBoolean(record, "user-invocable", diagnostics, input.path, false);
 	const metadata: AgentSkillMetadata = Object.freeze({
 		name,
 		description,
@@ -487,6 +514,8 @@ function compatibleSkill(
 		...(compatibility !== undefined ? { compatibility } : {}),
 		metadata: metadataField(record, diagnostics, input.path, false),
 		...(allowedTools !== undefined ? { allowedTools } : {}),
+		...(disableModelInvocation !== undefined ? { disableModelInvocation } : {}),
+		...(userInvocable !== undefined ? { userInvocable } : {}),
 	});
 	for (const field of Object.keys(record)) {
 		if (!STANDARD_FIELDS.has(field)) {

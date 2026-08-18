@@ -15,6 +15,7 @@ import {
 	type DeliveryPlan,
 	errorMessage,
 	type GraphRecord,
+	type ItemProjection,
 	type ItemRecord,
 	immutableData,
 	isTerminal,
@@ -490,7 +491,7 @@ function planAddedItem(input: {
 		seen.add(dependencyId);
 		dependencies.push(dependencyId);
 	}
-	const configuration = specification.configuration ?? parent.projection.desiredConfiguration;
+	const configuration = mergeChildConfiguration(specification.configuration, parent.projection.desiredConfiguration);
 	assertConfiguration(configuration);
 	const item = makeItem({
 		graphId: graph.id,
@@ -547,8 +548,8 @@ export async function validatePlanConfigurations(
 ): Promise<void> {
 	const signal = new AbortController().signal;
 	try {
-		for (const { item } of plan.newItems) {
-			await modelProvider.resolve(item.projection.desiredConfiguration, signal);
+		for (const entry of plan.newItems) {
+			await resolveNewItemConfiguration(entry, plan, modelProvider, signal);
 		}
 		for (const { command } of plan.configurations) {
 			await modelProvider.resolve(command.configuration, signal);
@@ -558,6 +559,68 @@ export async function validatePlanConfigurations(
 			code: "resource_reservation_failed",
 			message: `Runtime configuration failed: ${errorMessage(error)}`,
 		});
+	}
+}
+
+function mergeChildConfiguration(
+	requested: AddWorkItemSpecification["configuration"],
+	parent: DesiredRuntimeConfiguration,
+): DesiredRuntimeConfiguration {
+	const runLimits = requested?.runLimits ?? parent.runLimits;
+	return {
+		model: requested?.model ?? parent.model,
+		reasoning: requested?.reasoning ?? parent.reasoning,
+		...(runLimits ? { runLimits } : {}),
+	};
+}
+
+function parentItem(entry: NewItemPlan, plan: BatchPlan): ItemRecord | undefined {
+	const parentId = entry.item.parentId;
+	if (!parentId) return undefined;
+	const fromBatch = plan.newItems.find(
+		(candidate) => candidate.graph.id === entry.graph.id && candidate.item.id === parentId,
+	)?.item;
+	return fromBatch ?? entry.graph.items.get(parentId);
+}
+
+function sameModel(left: DesiredRuntimeConfiguration, right: DesiredRuntimeConfiguration): boolean {
+	return left.model.provider === right.model.provider && left.model.id === right.model.id;
+}
+
+function assignDesiredConfiguration(item: ItemRecord, configuration: DesiredRuntimeConfiguration): void {
+	const mutable = item as { projection: ItemProjection };
+	mutable.projection = immutableData({
+		...item.projection,
+		desiredConfiguration: configuration,
+	});
+}
+
+async function resolveNewItemConfiguration(
+	entry: NewItemPlan,
+	plan: BatchPlan,
+	modelProvider: Pick<RunModelProvider, "resolve">,
+	signal: AbortSignal,
+): Promise<void> {
+	const requested = entry.item.projection.desiredConfiguration;
+	try {
+		await modelProvider.resolve(requested, signal);
+		return;
+	} catch (error) {
+		const parent = parentItem(entry, plan);
+		if (!parent) throw error;
+		const inherited = parent.projection.desiredConfiguration;
+		if (sameModel(requested, inherited)) throw error;
+		const fallback: DesiredRuntimeConfiguration = {
+			model: inherited.model,
+			reasoning: requested.reasoning,
+			...(requested.runLimits ? { runLimits: requested.runLimits } : {}),
+		};
+		assignDesiredConfiguration(entry.item, fallback);
+		try {
+			await modelProvider.resolve(fallback, signal);
+		} catch {
+			throw error;
+		}
 	}
 }
 

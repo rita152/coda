@@ -13,6 +13,7 @@ import {
 } from "../../src/skills/context.ts";
 import { CodingSkillsManager } from "../../src/skills/manager.ts";
 import { collectSkillRoots } from "../../src/skills/roots.ts";
+import { createSkillsCapabilitySource } from "../../src/skills/run-capability.ts";
 
 const temporary: string[] = [];
 
@@ -125,7 +126,7 @@ describe("Skill activation context", () => {
 		await expect(snapshot.activate(skill.candidate.id)).rejects.toThrow("changed after this snapshot");
 	});
 
-	it("does not give non-standard invocation fields product semantics", async () => {
+	it("keeps slash-only Skills in the palette while hiding them from the model catalog", async () => {
 		const value = await fixture();
 		await writeSkill(
 			join(value.home, ".agents", "skills"),
@@ -134,10 +135,32 @@ describe("Skill activation context", () => {
 			"user-invocable: false\ndisable-model-invocation: true\n",
 		);
 		const snapshot = await value.manager.refresh();
+		const source = createSkillsCapabilitySource(value.manager);
+		const lease = await source.acquire({
+			model: {
+				id: "skills-test",
+				name: "Skills test",
+				api: "test",
+				provider: "test",
+				baseUrl: "http://localhost.invalid",
+				reasoning: false,
+				input: ["text" as const],
+				contextWindow: 128_000,
+				maxTokens: 16_000,
+			},
+			signal: new AbortController().signal,
+		});
 
-		expect(snapshot.resolved.map(({ candidate }) => candidate.id)).toEqual([snapshot.resolved[0]!.candidate.id]);
-		expect(skillExtensionEntries(snapshot).map(({ name }) => name)).toEqual(["portable"]);
-		expect(snapshot.diagnostics.filter(({ code }) => code === "unknown-field")).toHaveLength(2);
+		try {
+			expect(snapshot.resolved.map(({ candidate }) => candidate.id)).toEqual([snapshot.resolved[0]!.candidate.id]);
+			expect(snapshot.resolved[0]?.implicitInvocation).toBe(false);
+			expect(skillExtensionEntries(snapshot).map(({ name }) => name)).toEqual(["portable"]);
+			expect(snapshot.diagnostics.filter(({ code }) => code === "unknown-field")).toHaveLength(2);
+			expect(lease.tools).toEqual([]);
+			expect(lease.promptFragments).toEqual([]);
+		} finally {
+			await lease.dispose();
+		}
 	});
 
 	it("rejects overlapping or text-mismatched structured reference ranges", () => {

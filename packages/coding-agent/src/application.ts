@@ -21,7 +21,7 @@ import {
 import { HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
 import { runInteractiveApplication } from "./app/interactive-run.ts";
 import { createAttachmentPreparer } from "./app/interactive-session-options.ts";
-import { promptInput } from "./app/media-attachments.ts";
+import { prepareUserPrompt } from "./app/prepare-user-prompt.ts";
 import { runPrint } from "./app/print-run.ts";
 import {
 	authenticateInitialModel,
@@ -596,7 +596,13 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					for (const path of parsed.imagePaths) {
 						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
 					}
-					const initialInput = await promptInput(parsed.prompt, initialAttachmentIds, mediaLibrary);
+					const initialInput = await prepareUserPrompt({
+						text: parsed.prompt,
+						attachmentIds: initialAttachmentIds,
+						mediaLibrary,
+						skills: skillsSnapshot,
+						...(mcpRegistry ? { mcpRegistry } : {}),
+					});
 					const prepareAttachments = createAttachmentPreparer({
 						restoredMedia,
 						mediaLibrary,
@@ -626,6 +632,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							skillsSnapshot,
 							skillsCommand,
 							mcpCommand,
+							...(mcpRegistry ? { mcpRegistry } : {}),
 							hooksCommand,
 							permissionsCommand,
 							commandRegistry,

@@ -1,4 +1,9 @@
-import type { CodingAgentCommandBatch, CodingAgentReceipt, DesiredRuntimeConfiguration, WorkResult } from "./types.ts";
+import type {
+	CodingAgentCommandBatch,
+	CodingAgentReceipt,
+	DesiredRuntimeConfigurationPatch,
+	WorkResult,
+} from "./types.ts";
 import { type GraphRecord, type ItemRecord, isTerminal } from "./work-graph-records.ts";
 
 export interface DelegatedWorkItemSpecification {
@@ -6,7 +11,7 @@ export interface DelegatedWorkItemSpecification {
 	readonly objective: string;
 	readonly executionMode: "read_only" | "write";
 	readonly dependencies?: readonly string[];
-	readonly configuration?: DesiredRuntimeConfiguration;
+	readonly configuration?: DesiredRuntimeConfigurationPatch;
 }
 
 export interface WorkGraphDelegationHost {

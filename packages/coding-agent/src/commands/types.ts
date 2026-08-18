@@ -7,7 +7,7 @@ export type CommandTrigger = "/" | "$";
 const COMMAND_TRIGGER_BY_SOURCE: Readonly<Record<CommandSource, CommandTrigger>> = Object.freeze({
 	core: "/",
 	skill: "$",
-	mcp: "/",
+	mcp: "$",
 });
 
 export function commandTrigger(source: CommandSource): CommandTrigger {

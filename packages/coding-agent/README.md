@@ -152,10 +152,13 @@ Local Agent Skills are discovered only from `<Workspace>/.agents/skills` and
 `~/.agents/skills`; Coda does not scan client-specific or ancestor directories.
 The project root has deterministic precedence over the global root. Global Skills
 are user-managed, and typing `$` shows project and global Skills for explicit
-selection. Coda does not make a separate Skill safety decision. Explicit
+selection. A plain `$name` in print or interactive text injects that Skill for
+the current Run. Coda does not make a separate Skill safety decision. Explicit
 Composer Skill references are user-selected context; model-selected Skills use
-the `skill` Tool to load exact-revision instructions. `/skills` remains the sole
-Skill management command.
+the `skill` Tool to load exact-revision instructions. Skills marked
+`disable-model-invocation: true` or Codex `policy.allow_implicit_invocation: false`
+stay in the `$` palette and can be `$`-injected, but they are omitted from the
+model catalog. `/skills` remains the sole Skill management command.
 
 ## Lifecycle Hooks
 
@@ -287,8 +290,10 @@ named in `environmentFrom`; ambient credentials are not inherited. HTTP bearer
 tokens are read from the named Coda process environment variable and are never
 stored in the Definition.
 
-Every admitted Tool is namespaced as `mcp__<server>__<tool>` and frozen for one
-Run. Server annotations do not change how Coda invokes the Tool. Form and URL Elicitation identify the requesting Server; Coda never
+Every admitted Tool is namespaced as `mcp__<server>__<tool>`. A Tool enters a
+Run only when the user names it with `$` — `$search`, `$docs-search`,
+`$mcp__docs__search`, or `$docs` for every Tool on that Server. Server
+annotations do not change how Coda invokes the Tool. Form and URL Elicitation identify the requesting Server; Coda never
 prefetches or opens an Elicitation URL. Print mode declines Elicitation.
 Use `/mcp status`, `/mcp doctor`, `/mcp inspect`, `/mcp reload`, and
 `/mcp reconnect` for read-only inspection and operational control.
@@ -325,7 +330,7 @@ This status block is generated from executable runtime contracts. See the
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
 - **Lifecycle Hooks** (@coda/coding-agent) — Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, and Stop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation.
-- **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, immutable Run catalogs, progress, cancellation, subscriptions, and form or URL Elicitation.
+- **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, mention-gated Run admission, progress, cancellation, subscriptions, and form or URL Elicitation.
 - **Media Assets** (@coda/coding-agent) — Bounded image Attachments use content-addressed Session storage, model-ready renditions, Kitty previews, and a system-viewer fallback.
 - **Context Overflow fallback** (@coda/coding-agent) — After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.
 - **Process Confinement** (@coda/sandbox) — A leaf wrapScript seam confines Bash, User Shell, and Process Session scripts through Anthropic Sandbox Runtime in read-only or workspace-write mode. danger-full-access leaves the process on the host. File Tools, hook handlers, and credential helpers stay on the host.
@@ -335,8 +340,8 @@ This status block is generated from executable runtime contracts. See the
 - **Objective Run evidence** (@coda/coding-agent) — Completed Runs project bounded, sanitized evidence from lifecycle events, authoritative Tool Observations, generic mutation facts, and the final Git-visible Workspace diff, separating completeness, changed-path provenance, terminal/recovered/open failures, pending operations, retries, token usage, and price-data completeness.
 - **Bounded Session history recovery** (@coda/coding-agent) — The `read_session_history` Tool pages through committed historical Messages with bounded, cursor-based windows and authoritative Observations without exposing pending Draft state.
 - **Durable Sessions** (@coda/coding-agent) — Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, Compaction Checkpoints, and generated Session Titles. Current Session format: v11.
-- **Agent Skills** (@coda/skills) — Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, and immutable per-Run catalogs.
-- **Terminal experience** (@coda/coding-agent) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill mention, and Workspace-scoped `@` file mention completion, plus background Session activity.
+- **Agent Skills** (@coda/skills) — Agent Skills-compatible validation, bounded project and global discovery, exact-revision activation, project-first collision handling, immutable per-Run catalogs that hide slash-only Skills, and both automatic skill Tool loading and explicit `$` injection.
+- **Terminal experience** (@coda/coding-agent) — Full-screen semantic Timeline and Transcript View, CommonMark/GFM rendering, Thinking Blocks, a multiline Composer, Prompt History, Slash command, explicit `$` Skill and MCP mentions, and Workspace-scoped `@` file mention completion, plus background Session activity.
 - **User Shell Adapter and input queues** (@coda/coding-agent) — Explicit `!command` User Shell execution remains outside model Context and Session persistence; the CLI Adapter owns its local FIFO and submits Prompt, Steering, and Follow-up input through the public Work Item command seam.
 - **Offline Agent evaluation harness** (@coda/evals) — Deterministic Faux Model fixtures score observable task behavior, acceptance checks, Tool recovery, repetition, compaction continuity, latency, tokens, and price data without network access.
 - **Durable Work Graph orchestration** (@coda/runtime) — A closed submit/observe/close Interface coordinates durable Work Graphs, deterministic DAG scheduling, bounded parallel Work Items, isolated Worker Sessions and observations, ordered causal control, cancellation, recovery, structured results, and pluggable Direct or Git-worktree Workspace Publication while keeping serial Worker Runtimes private.

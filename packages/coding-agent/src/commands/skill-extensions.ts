@@ -1,11 +1,8 @@
 import type { SkillId } from "@coda/skills";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
+import { isTriggerCompatibleName } from "./mentions.ts";
 import type { CommandRegistry } from "./registry.ts";
 import { type CommandExtensionEntry, registerCommandExtension } from "./unified-registry.ts";
-
-function triggerCompatible(name: string): boolean {
-	return name.length > 0 && !/[\s$]/u.test(name);
-}
 
 /** Projects Skills into stable Composer entries without coupling Skills state to Commands. */
 export function skillExtensionEntries(snapshot: CodingSkillsSnapshot): readonly CommandExtensionEntry[] {
@@ -19,7 +16,7 @@ export function skillExtensionEntries(snapshot: CodingSkillsSnapshot): readonly 
 		snapshot.resolved.flatMap((entry) => {
 			const surfaceWinner = shortAliasByName.get(entry.candidate.metadata.name) === entry.candidate.id;
 			const name = surfaceWinner ? entry.candidate.metadata.name : entry.qualifiedName;
-			if (!triggerCompatible(name)) return [];
+			if (!isTriggerCompatibleName(name)) return [];
 			const id = String(entry.candidate.id).replace(/^skill:/u, "");
 			return [
 				Object.freeze({
