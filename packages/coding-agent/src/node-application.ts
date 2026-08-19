@@ -28,8 +28,10 @@ import { createFileWorkspacePersistence } from "./runtime/file-workspace-persist
 import { FileSessionManager } from "./session/file-session-manager.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { SessionManagerRouter } from "./session/session-manager-router.ts";
+import { interruptedToolRecoveryChoices } from "./session/session-recovery.ts";
 import type { SessionManager } from "./session/types.ts";
 import { createNodeSkillWatcherFactory, type SkillWatcherFactory } from "./skills/watcher.ts";
+import { createInterruptedToolRecoveryCatalog } from "./tools/recovery-catalog.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./ui/process-lifecycle.ts";
 import { selectFromTerminal } from "./ui/prompts.ts";
@@ -263,6 +265,14 @@ export function createNodeCodingAgentApplication(
 					},
 				},
 				diagnostics: diagnosticOutput,
+				recoveryTools: ({ workspace: sessionWorkspace }) =>
+					createInterruptedToolRecoveryCatalog({
+						workspacePath: sessionWorkspace.path,
+						fileSystem,
+						processRunner,
+						homeDirectory,
+						environment,
+					}),
 				interruptedToolRecovery: async ({ invocation, runId, startedAt }) => {
 					if (!activeTerminal) {
 						throw new Error("Interrupted Tool recovery requires an active interactive Terminal");
@@ -286,17 +296,10 @@ export function createNodeCodingAgentApplication(
 							`Replay safety: ${invocation.replaySafety ?? "unknown"}`,
 							"Its external side effects are unknown. Coda will never replay it automatically.",
 						].join("\n"),
-						[
-							{ id: "cancel", label: "Cancel resume" },
-							{
-								id: "skip",
-								label: "Skip this invocation",
-								description:
-									"Resume with an explicit error result; request a new invocation later to re-execute.",
-							},
-						],
+						interruptedToolRecoveryChoices(invocation.replaySafety),
 					);
-					return selection === "skip" ? "skip" : "cancel";
+					if (selection === "skip" || selection === "re-execute") return selection;
+					return "cancel";
 				},
 			}),
 		);

@@ -28,7 +28,15 @@ const REASONING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xh
 const RUN_OUTCOMES = new Set(["success", "error", "aborted"]);
 const TOOL_OUTCOMES = new Set(["success", "error", "aborted", "rejected", "interrupted"]);
 const TOOL_SETTLEMENTS = new Set(["returned", "threw", "aborted"]);
-const TOOL_REASONS = new Set(["missing", "invalid", "aborted", "not_started", "budget", "skipped_by_user"]);
+const TOOL_REASONS = new Set([
+	"missing",
+	"invalid",
+	"aborted",
+	"not_started",
+	"budget",
+	"skipped_by_user",
+	"reexecuted_by_user",
+]);
 const RUN_LIMITS = new Set([
 	"turns",
 	"model_attempts",

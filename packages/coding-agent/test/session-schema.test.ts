@@ -150,5 +150,26 @@ describe("Session message schema", () => {
 				9,
 			),
 		).toBe(true);
+
+		expect(
+			isSessionRecordPayload(
+				"tool_finished",
+				{
+					invocation: {
+						id: "invocation:reexecute",
+						resultMessageId: "message:old",
+						providerToolCallId: "call:reexecute",
+						toolName: "read",
+						arguments: { path: "a.txt" },
+						sourceIndex: 0,
+						replaySafety: "safe",
+					},
+					outcome: "interrupted",
+					reason: "reexecuted_by_user",
+					resultMessageId: "message:old",
+				},
+				11,
+			),
+		).toBe(true);
 	});
 });

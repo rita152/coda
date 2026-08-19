@@ -56,9 +56,13 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Agent runtime",
 		summary:
-			"In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, and opt-in whole-Turn retry.",
-		sources: ["packages/agent/src/agent.ts", "packages/agent/src/types.ts"],
-		tests: ["packages/agent/test/agent-run.test.ts", "packages/agent/test/input-queues.test.ts"],
+			"In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, opt-in whole-Turn retry, and a public settleToolInvocation port for isolated lookup, validation, and execution.",
+		sources: ["packages/agent/src/agent.ts", "packages/agent/src/tool-settlement.ts", "packages/agent/src/types.ts"],
+		tests: [
+			"packages/agent/test/agent-run.test.ts",
+			"packages/agent/test/input-queues.test.ts",
+			"packages/agent/test/tool-settlement.test.ts",
+		],
 	}),
 	capability({
 		id: "runtime.work-graph-orchestration",
@@ -385,7 +389,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Durable Sessions",
 		summary:
-			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, Compaction Checkpoints, and generated Session Titles.",
+			"Append-only workspace-scoped Sessions restore Messages, queues, Composer and Extension facts, Media Assets, Model selection, Tool Observations, Compaction Checkpoints, and generated Session Titles. Interactive resume can skip or explicitly re-execute a safe Interrupted Tool Invocation; replaySafety never stays skip-only and print fails closed.",
 		sources: [
 			"packages/coding-agent/src/session/file-session-manager.ts",
 			"packages/coding-agent/src/session/records.ts",
@@ -395,13 +399,16 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 			"packages/coding-agent/src/session/session-recovery.ts",
 			"packages/coding-agent/src/session/session-schema.ts",
 			"packages/coding-agent/src/session/session-title.ts",
+			"packages/coding-agent/src/tools/recovery-catalog.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/session-application.test.ts",
 			"packages/coding-agent/test/session-file.test.ts",
+			"packages/coding-agent/test/session-recovery.test.ts",
 			"packages/coding-agent/test/session-schema.test.ts",
 			"packages/coding-agent/test/session-summary.test.ts",
 			"packages/coding-agent/test/session-title.test.ts",
+			"packages/coding-agent/test/recovery-catalog.test.ts",
 		],
 	}),
 	capability({
@@ -539,8 +546,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		package: "@coda/coding-agent",
 		status: "deferred",
 		title: "PermissionRequest Hook",
-		summary:
-			"PermissionRequest remains a deferred hook event. Command Permission resolves ask on PreToolUse.",
+		summary: "PermissionRequest remains a deferred hook event. Command Permission resolves ask on PreToolUse.",
 		sources: ["packages/runtime/src/lifecycle-hooks.ts", "packages/coding-agent/src/hooks/config.ts"],
 		tests: ["packages/coding-agent/test/hooks.test.ts"],
 	}),

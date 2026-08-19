@@ -57,7 +57,7 @@ export interface SessionRecordPayloadMap {
 		| {
 				readonly invocation: ToolInvocation;
 				readonly outcome: "interrupted";
-				readonly reason: "skipped_by_user";
+				readonly reason: "skipped_by_user" | "reexecuted_by_user";
 				readonly resultMessageId: string;
 		  };
 	readonly turn_finished: { readonly outcome: RunOutcome };

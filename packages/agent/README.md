@@ -23,6 +23,9 @@ Coding Agent policy.
   into Agent state.
 - Tools default to sequential execution. Only consecutive Tools marked
   `parallelSafe` may overlap, and every Tool declares `replaySafety`.
+  Callers that journal `tool_started` themselves can run the same lookup,
+  validation, `execute()`, and cancel path through `settleToolInvocation`
+  without constructing a Run.
 - An optional immutable `RunBudget` bounds Turns, model Attempts, Tool
   Invocations, elapsed wall time, total tokens, optional recorded USD cost, and
   consecutive equivalent Tool batches. Limits are checked only between model

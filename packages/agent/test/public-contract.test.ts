@@ -17,6 +17,7 @@ describe("@coda/agent public package contract", () => {
 			"cloneFrozen",
 			"deepFreeze",
 			"prepareStaticRun",
+			"settleToolInvocation",
 			"snapshotRunLimits",
 		]);
 		expect(typeof composeAgent).toBe("function");

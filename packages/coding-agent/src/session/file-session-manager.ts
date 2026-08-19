@@ -9,7 +9,11 @@ import { SessionCodecRegistry } from "./session-codec-registry.ts";
 import { type SessionJournalAppender, SessionJournalStore } from "./session-journal-store.ts";
 import { type ProcessInspector, SessionLease, type SessionLockOwner } from "./session-lease.ts";
 import { hasRetainedSessionActivity, isProvisionalSessionRecord } from "./session-lifecycle.ts";
-import { type InterruptedToolRecovery, SessionRecovery } from "./session-recovery.ts";
+import {
+	type InterruptedToolRecovery,
+	type InterruptedToolRecoveryCatalog,
+	SessionRecovery,
+} from "./session-recovery.ts";
 import { summarizeSessionRecords } from "./session-summary.ts";
 import type {
 	OpenSessionRequest,
@@ -30,6 +34,7 @@ export interface FileSessionManagerOptions extends SessionRuntime {
 	readonly processInspector: ProcessInspector;
 	readonly diagnostics?: DiagnosticSink;
 	readonly interruptedToolRecovery?: InterruptedToolRecovery;
+	readonly recoveryTools?: InterruptedToolRecoveryCatalog;
 }
 
 interface ListedSessionJournal {
@@ -62,6 +67,7 @@ export class FileSessionManager implements SessionManager {
 			runtime: this.#runtime,
 			diagnostics: options.diagnostics,
 			interruptedToolRecovery: options.interruptedToolRecovery,
+			recoveryTools: options.recoveryTools,
 		});
 	}
 
@@ -146,6 +152,7 @@ export class FileSessionManager implements SessionManager {
 				sessionId,
 				path,
 				mode: request.mode,
+				workspace: request.workspace,
 				append,
 			});
 			const journal: SessionJournal = {

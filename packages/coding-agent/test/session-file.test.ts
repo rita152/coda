@@ -827,6 +827,136 @@ describe("JSONL File Session", () => {
 		]);
 	});
 
+	it("can re-execute a safe Interrupted Tool Invocation with a new identity", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-tool-reexecute-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_276 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+			interruptedToolRecovery: async (request) => {
+				expect(request.invocation).toMatchObject({
+					id: "invocation:crashed",
+					providerToolCallId: "provider:crashed",
+					toolName: "read",
+					replaySafety: "safe",
+				});
+				return "re-execute";
+			},
+			recoveryTools: async () => [
+				{
+					name: "read",
+					description: "read",
+					parameters: Type.Object({ path: Type.String() }, { additionalProperties: false }),
+					replaySafety: "safe" as const,
+					execute: ({ path }: { path: string }) => ({ content: `re-executed:${path}` }),
+				},
+			],
+		});
+		const created = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+		});
+		const sessionId = created.descriptor.id;
+		const path = await installEmptyJournal(created);
+		const records = [
+			{
+				type: "run_started",
+				runId: "run:crashed",
+				payload: { source: "prompt" },
+			},
+			{
+				type: "message_committed",
+				runId: "run:crashed",
+				payload: {
+					message: {
+						id: "message:user",
+						message: { role: "user", content: "read it", timestamp: 1_276 },
+					},
+				},
+			},
+			{
+				type: "message_committed",
+				runId: "run:crashed",
+				turnId: "turn:crashed",
+				payload: {
+					message: {
+						id: "message:assistant",
+						message: fauxAssistantMessage(fauxToolCall("read", { path: "x.txt" }, { id: "provider:crashed" }), {
+							stopReason: "toolUse",
+							timestamp: 1_276,
+						}),
+					},
+				},
+			},
+			{
+				type: "tool_started",
+				runId: "run:crashed",
+				turnId: "turn:crashed",
+				payload: {
+					invocation: {
+						id: "invocation:crashed",
+						resultMessageId: "message:tool-result",
+						providerToolCallId: "provider:crashed",
+						toolName: "read",
+						arguments: { path: "x.txt" },
+						sourceIndex: 0,
+						replaySafety: "safe",
+					},
+				},
+			},
+		];
+		let previousRecordId: string | null = null;
+		for (const [index, record] of records.entries()) {
+			const recordId = `record:crash:${index + 1}`;
+			await appendFile(
+				path,
+				`${JSON.stringify({
+					...record,
+					recordId,
+					sessionId,
+					sequence: index + 1,
+					previousRecordId,
+					timestamp: 1_276,
+				})}\n`,
+				"utf8",
+			);
+			previousRecordId = recordId;
+		}
+
+		const resumed = await manager.open({
+			workspace: { id: "workspace-hash", path: "/canonical/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(resumed.seed.messages.map(({ message }) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(resumed.seed.messages.at(-1)?.message).toMatchObject({
+			role: "toolResult",
+			toolCallId: "provider:crashed",
+			content: [{ type: "text", text: "re-executed:x.txt" }],
+		});
+		await resumed.close();
+
+		const persisted = (await readFile(path, "utf8"))
+			.trimEnd()
+			.split("\n")
+			.slice(1)
+			.map((line) => JSON.parse(line));
+		expect(persisted.slice(-5).map((record) => record.type)).toEqual([
+			"tool_finished",
+			"tool_started",
+			"tool_finished",
+			"message_committed",
+			"run_finished",
+		]);
+		expect(persisted.at(-4).payload.invocation.id).not.toBe("invocation:crashed");
+		expect(persisted.at(-4).payload.invocation.providerToolCallId).toBe("provider:crashed");
+	});
+
 	it("refuses a structurally valid line whose typed payload violates the v1 schema", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-invalid-payload-"));
 		temporaryDirectories.push(homeDirectory);

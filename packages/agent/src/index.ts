@@ -12,4 +12,9 @@ export { cloneFrozen, deepFreeze } from "./immutable.ts";
 export { BoundedObservationQueue, type BoundedObservationQueueOptions } from "./observation-queue.ts";
 export { prepareStaticRun } from "./prepared-run.ts";
 export { assertRunLimits, RUN_LIMIT_KEYS, snapshotRunLimits } from "./run-limits.ts";
+export {
+	type SettledToolInvocation,
+	type SettleToolInvocationInput,
+	settleToolInvocation,
+} from "./tool-settlement.ts";
 export type * from "./types.ts";

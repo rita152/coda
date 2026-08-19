@@ -2,13 +2,9 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type Context,
-	type ImageContent,
 	type Message,
 	type NormalizedModelFailure,
-	resolveToolObservation,
-	type TextContent,
 	type ToolCall,
-	type ToolObservation,
 	type ToolResultMessage,
 	type UserMessage,
 	validateToolArguments,
@@ -20,6 +16,7 @@ import { BoundedObservationQueue } from "./observation-queue.ts";
 import { initialRuntimeState, type RuntimeState, reduceState } from "./reducer.ts";
 import { RunBudgetMeter, runBudgetFailure, snapshotRunBudget } from "./run-budget.ts";
 import { validateAgentSeed } from "./seed.ts";
+import { executePreparedToolInvocation, rejectedToolResult, toolResultMessage } from "./tool-settlement.ts";
 import type {
 	AgentEvent,
 	AgentEventPayload,
@@ -46,8 +43,6 @@ import type {
 	RunResult,
 	RunSource,
 	ToolExecutionOutcome,
-	ToolExecutionOutput,
-	ToolExecutionProgress,
 	ToolExecutionSettlement,
 	ToolInvocation,
 	ToolInvocationId,
@@ -114,12 +109,6 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function toolExecutionOutcome(status: ToolObservation["status"]): ToolExecutionOutcome {
-	if (status === "ok") return "success";
-	if (status === "aborted") return "aborted";
-	return "error";
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -179,12 +168,6 @@ function eventDelta(event: AssistantMessageEvent): MessageDelta | undefined {
 		default:
 			return undefined;
 	}
-}
-
-function normalizedToolContent(content: ToolExecutionOutput["content"]): readonly (TextContent | ImageContent)[] {
-	if (typeof content === "string") return [{ type: "text", text: content }];
-	if (!Array.isArray(content)) throw new Error("Tool output content must be a string or content block array");
-	return structuredClone(content) as (TextContent | ImageContent)[];
 }
 
 function normalizedModelFailure(value: unknown): NormalizedModelFailure | undefined {
@@ -1169,15 +1152,7 @@ export class Agent {
 		message: string,
 		cleanup = false,
 	): Promise<void> {
-		const result = this.#toolResult(invocation, {
-			content: message,
-			observation: {
-				status: reason === "aborted" || reason === "not_started" ? "aborted" : "error",
-				truncated: false,
-				facts: { reason },
-			},
-			details: { status: "rejected", reason },
-		});
+		const result = rejectedToolResult(invocation, reason, message, this.#options.clock);
 		const payload = {
 			type: "tool_execution_rejected",
 			turnId,
@@ -1294,51 +1269,32 @@ export class Agent {
 	}
 
 	async #settleTool(run: RunContext, turnId: TurnId, entry: AcceptedTool): Promise<ToolSettlement> {
-		let acceptsProgress = true;
-		const reportProgress = (progress: ToolExecutionProgress): void => {
-			if (!acceptsProgress || run.controller.signal.aborted) return;
-			const snapshot = cloneFrozen(progress);
-			this.#emitObservation(run, {
-				type: "tool_execution_progress",
-				turnId,
-				invocation: entry.invocation,
-				progress: snapshot,
-			});
-		};
-		try {
-			const output = await entry.tool.execute(entry.arguments, {
+		const settled = await executePreparedToolInvocation({
+			tool: entry.tool,
+			arguments: entry.arguments,
+			invocation: entry.invocation,
+			context: {
 				signal: run.controller.signal,
 				runId: run.id,
 				turnId,
-				invocationId: entry.invocation.id,
-				resultMessageId: entry.invocation.resultMessageId,
-				providerToolCallId: entry.invocation.providerToolCallId,
-				reportProgress,
-			});
-			acceptsProgress = false;
-			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
-			const result = this.#toolResult(entry.invocation, output);
-			return {
-				entry,
-				settlement: "returned",
-				outcome: toolExecutionOutcome(resolveToolObservation(result.message).status),
-				result,
-			};
-		} catch (error) {
-			acceptsProgress = false;
-			if (run.controller.signal.aborted) return this.#abortedSettlement(entry);
-			return {
-				entry,
-				settlement: "threw",
-				outcome: "error",
-				error,
-				result: this.#toolResult(entry.invocation, {
-					content: `Tool "${entry.call.name}" failed: ${errorMessage(error)}`,
-					observation: { status: "error", truncated: false },
-					details: { status: "failed", error: { message: errorMessage(error) } },
-				}),
-			};
-		}
+				clock: this.#options.clock,
+				reportProgress: (progress) => {
+					this.#emitObservation(run, {
+						type: "tool_execution_progress",
+						turnId,
+						invocation: entry.invocation,
+						progress,
+					});
+				},
+			},
+		});
+		return {
+			entry,
+			settlement: settled.settlement,
+			outcome: settled.outcome,
+			result: settled.result,
+			...(settled.error !== undefined ? { error: settled.error } : {}),
+		};
 	}
 
 	#abortedSettlement(entry: AcceptedTool): ToolSettlement {
@@ -1346,28 +1302,16 @@ export class Agent {
 			entry,
 			settlement: "aborted",
 			outcome: "aborted",
-			result: this.#toolResult(entry.invocation, {
-				content: `Tool "${entry.call.name}" was aborted`,
-				observation: { status: "aborted", truncated: false },
-				details: { status: "aborted" },
-			}),
+			result: toolResultMessage(
+				entry.invocation,
+				{
+					content: `Tool "${entry.call.name}" was aborted`,
+					observation: { status: "aborted", truncated: false },
+					details: { status: "aborted" },
+				},
+				this.#options.clock,
+			),
 		};
-	}
-
-	#toolResult(invocation: ToolInvocation, output: ToolExecutionOutput): AgentMessage<ToolResultMessage> {
-		const observation = resolveToolObservation(output);
-		return cloneFrozen({
-			id: invocation.resultMessageId,
-			message: {
-				role: "toolResult",
-				toolCallId: invocation.providerToolCallId,
-				toolName: invocation.toolName,
-				content: normalizedToolContent(output.content),
-				observation,
-				details: structuredClone(output.details),
-				timestamp: this.#options.clock.now(),
-			},
-		});
 	}
 
 	async #emit(run: RunContext, payload: AgentEventPayload): Promise<void> {
