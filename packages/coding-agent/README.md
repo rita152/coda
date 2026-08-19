@@ -78,6 +78,59 @@ motion for one invocation. Persistent UI defaults can be set in
 }
 ```
 
+### Web access
+
+The read-only `web_search` Tool is for current or otherwise unknown
+information. It tries the configured Providers in order, skips unavailable
+Providers, and falls back after empty results, errors, or timeouts. The
+`fetch` Tool is for a known HTTP or HTTPS URL. It converts readable HTML to
+Markdown and also handles JSON, text, RSS/Atom Feeds, PNG/JPEG/GIF/WebP images,
+and PDF, DOCX, PPTX, XLSX, and EPUB documents. `raw: true` bypasses shaping for
+textual responses; binary images and documents still use their bounded safe
+representations.
+
+Brave reads `BRAVE_SEARCH_API_KEY` (or `BRAVE_API_KEY`) and Tavily reads
+`TAVILY_API_KEY` from the process environment. Search credentials are never
+valid settings fields. SearXNG is available when `searxngEndpoint` is set, and
+DuckDuckGo needs no credential. Defaults and Provider order can be overridden
+in `~/.coda/settings.json`:
+
+```json
+{
+  "version": 1,
+  "web": {
+    "search": {
+      "providers": ["brave", "tavily", "searxng", "duckduckgo"],
+      "timeoutMs": 10000,
+      "maxResults": 8,
+      "maxCharacters": 20000,
+      "searxngEndpoint": "https://search.example.com"
+    },
+    "fetch": {
+      "timeoutMs": 20000,
+      "maxBytes": 10485760,
+      "maxCharacters": 120000
+    },
+    "cache": {
+      "ttlMs": 300000,
+      "maxEntries": 128,
+      "maxBytes": 8388608
+    }
+  }
+}
+```
+
+Both Tools reuse `sandbox.allowedDomains` and `sandbox.deniedDomains` for
+outbound HTTP. Redirects are followed manually and checked on every hop.
+Private, loopback, link-local, and local literal or resolved addresses are
+refused unless the hostname is explicitly listed in `allowedDomains`;
+`deniedDomains` always wins. Exact domain rules match only that host,
+`*.example.com` matches strict subdomains, and an optional `:port` narrows a
+rule. An explicitly empty allowlist blocks all outbound HTTP, while `*` is a
+valid deny-all rule only in `deniedDomains`. When an allowlist is present,
+include both the desired content hosts and the selected search Provider
+endpoints.
+
 ### Print completion semantics
 
 Print mode keeps Agent lifecycle settlement separate from evidence-backed task
@@ -336,7 +389,7 @@ This status block is generated from executable runtime contracts. See the
 - **Bounded Agent Runs** (@coda/agent) — Immutable per-Run budgets cap Turns, Model Attempts, Tool invocations, elapsed time, token and USD usage, and repeated equivalent Tool batches with explicit exhaustion events.
 - **Agent runtime** (@coda/agent) — In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, opt-in whole-Turn retry, and a public settleToolInvocation port for isolated lookup, validation, and execution.
 - **Model access** (@coda/ai) — OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh. Custom Provider protocols: `openai.chatcompletions`, `openai.responses`, and `anthropic.messages`.
-- **Built-in Tools** (@coda/coding-agent) — Workspace-relative and absolute-path reading, search, atomic single-file create-or-replace and exact-text edit, direct host Shell execution, and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and `process`.
+- **Built-in Tools** (@coda/coding-agent) — Workspace-relative and absolute-path reading and search; multi-Provider Web search with timeout, fallback, deduplication, and bounded caching; clean URL fetching for HTML, structured text, Feeds, images, and common documents; atomic single-file create-or-replace and exact-text edit; direct host Shell execution; and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `web_search`, `fetch`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and `process`.
 - **Command Permission** (@coda/permission) — A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session. Print mode defaults to never and denies unresolved asks.
 - **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.

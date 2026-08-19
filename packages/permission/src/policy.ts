@@ -12,7 +12,16 @@ import {
 	requestsSandboxOverride,
 } from "./types.ts";
 
-const READ_ONLY_TOOLS = new Set(["read", "read_session_history", "read_tool_output", "grep", "find", "ls"]);
+const READ_ONLY_TOOLS = new Set([
+	"read",
+	"read_session_history",
+	"read_tool_output",
+	"grep",
+	"find",
+	"ls",
+	"web_search",
+	"fetch",
+]);
 
 const FILE_WRITE_TOOLS = new Set(["write", "edit"]);
 

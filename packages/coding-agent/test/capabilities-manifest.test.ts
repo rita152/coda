@@ -33,6 +33,8 @@ describe("generated capability artifacts", () => {
 
 		expect(manifest.runtimeFacts.session.currentFormatVersion).toBe(CURRENT_SESSION_FORMAT_VERSION);
 		expect(manifest.runtimeFacts.tools.builtIn).toContain("read_tool_output");
+		expect(manifest.runtimeFacts.tools.builtIn).toContain("web_search");
+		expect(manifest.runtimeFacts.tools.builtIn).toContain("fetch");
 		expect(manifest.runtimeFacts.commands).not.toContainEqual(expect.objectContaining({ name: "compact" }));
 		expect(byId.get("coding-agent.context-compaction")).toMatchObject({
 			status: "runtime-supported",
@@ -49,6 +51,8 @@ describe("generated capability artifacts", () => {
 		).not.toContain("coding-agent.context-compaction");
 		expect(readmeText).toContain(`Current Session format: v${CURRENT_SESSION_FORMAT_VERSION}`);
 		expect(readmeText).toContain("`read_tool_output`");
+		expect(readmeText).toContain("`web_search`");
+		expect(readmeText).toContain("`fetch`");
 	});
 
 	it("conforms to the v1 schema and points to existing evidence", async () => {

@@ -28,6 +28,7 @@ import { createSessionTitleComplete, subscribeSessionTitleGeneration } from "../
 import type { Session, SessionManager } from "../session/types.ts";
 import type { TrustedProjectInstructions } from "../settings/project-context.ts";
 import type { CodingSkillsManager } from "../skills/manager.ts";
+import type { WebRuntime } from "../tools/web/runtime.ts";
 import { codingAgentRunBudget } from "./argument-parsing.ts";
 import {
 	bindInteractiveRunControl,
@@ -62,6 +63,7 @@ export interface WorkspaceSessionApplicationOptions {
 		request: Parameters<ProcessConfinement["wrapScript"]>[0],
 	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
 	readonly runtime: WorkspaceSessionRuntime;
+	readonly web: WebRuntime;
 	readonly workspacePersistence?: (request: {
 		readonly workspaceId: string;
 		readonly workspaceRoot: string;
@@ -338,6 +340,7 @@ export async function openWorkspaceRuntime(input: {
 		interactionMode: input.mode,
 		projectInstructions: input.projectInstructions,
 		lifecycleHooks: input.lifecycleHooks,
+		web: input.options.web,
 		...(input.options.wrapScript ? { wrapScript: input.options.wrapScript } : {}),
 		resources: inputResources.adapter,
 		openPrivateSession: (sessionId) =>

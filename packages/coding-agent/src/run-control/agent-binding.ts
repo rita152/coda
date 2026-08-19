@@ -11,7 +11,16 @@ import type {
 	RunControlTrigger,
 } from "./types.ts";
 
-const INSPECTION_TOOLS = new Set(["read", "grep", "find", "ls", "read_tool_output", "read_session_history"]);
+const INSPECTION_TOOLS = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"read_tool_output",
+	"read_session_history",
+	"web_search",
+	"fetch",
+]);
 
 export interface AgentRunControlBindingOptions {
 	readonly work: Pick<SessionWorkController, "cancel" | "deliver" | "subscribeControl" | "subscribeResult">;

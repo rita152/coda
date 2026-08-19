@@ -30,6 +30,7 @@ import type { CodingSkillsManager } from "../skills/manager.ts";
 import { createSkillsCapabilitySource } from "../skills/run-capability.ts";
 import { createCodingToolContributions } from "../tools/index.ts";
 import { TargetMutationCoordinator } from "../tools/mutation.ts";
+import { unavailableWebRuntime, type WebRuntime } from "../tools/web/runtime.ts";
 import { createDirectWorkspaceExecution } from "./direct-workspace-execution.ts";
 import { createGitWorktreeWorkspaceExecution } from "./git-worktree-workspace-execution.ts";
 import { SessionWorkController, type SessionWorkHost, type SessionWorkSelection } from "./session-work-controller.ts";
@@ -240,6 +241,7 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly wrapScript?: (
 		request: Parameters<ProcessConfinement["wrapScript"]>[0],
 	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
+	readonly web?: WebRuntime;
 }): WorkspaceWorkCoordinator {
 	const capacity = options.capacity ?? DEFAULT_WORK_CAPACITY_POLICY;
 	const sessions = new WorkspaceWorkSessions({
@@ -262,10 +264,7 @@ export function createWorkspaceWorkCoordinator(options: {
 
 	const elicitationHandlerFor = (sessionId: string | undefined) => {
 		if (!sessionId) return undefined;
-		return (
-			elicitationBySession.get(sessionId) ??
-			elicitationBySession.get(parentSessionByChild.get(sessionId) ?? "")
-		);
+		return elicitationBySession.get(sessionId) ?? elicitationBySession.get(parentSessionByChild.get(sessionId) ?? "");
 	};
 	const placementWorkspaces = new Map<string, Promise<Workspace>>([
 		[options.workspace.root, Promise.resolve(options.workspace)],
@@ -289,6 +288,7 @@ export function createWorkspaceWorkCoordinator(options: {
 			sessionHistory: sessions.history(request.sessionId),
 			sessionId: request.sessionId,
 			mutationCoordinator,
+			web: options.web ?? unavailableWebRuntime,
 			...(options.wrapScript ? { wrapScript: options.wrapScript } : {}),
 		});
 	const quiesceSession = (sessionId: string) => options.processSessionManager.retireSession(sessionId);

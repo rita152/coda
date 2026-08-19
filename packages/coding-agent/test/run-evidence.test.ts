@@ -324,6 +324,41 @@ describe("RunEvidence projection", () => {
 		);
 	});
 
+	it("scopes Web failures and pending operations by query or URL", () => {
+		const projection = new RunEvidenceProjection();
+		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 341 }));
+		const failedSearch = invocation("web:search:failed", "web_search", { query: "latest release" }, 0);
+		const recoveredSearch = invocation("web:search:recovered", "web_search", { query: "latest release" }, 1);
+		const failedFetch = invocation("web:fetch:failed", "fetch", { url: "https://example.test/a" }, 2);
+		const unrelatedFetch = invocation("web:fetch:other", "fetch", { url: "https://example.test/b" }, 3);
+		const pendingFetch = invocation("web:fetch:pending", "fetch", { url: "https://example.test/pending" }, 4);
+		const cases = [
+			[failedSearch, observation("error", { facts: { code: "web_search_failed" } })],
+			[recoveredSearch, observation("ok")],
+			[failedFetch, observation("error", { facts: { code: "fetch_failed" } })],
+			[unrelatedFetch, observation("ok")],
+		] as const;
+		for (const [index, [tool, result]] of cases.entries()) {
+			projection.accept(toolStart(tool, 342 + index * 2));
+			projection.accept(toolEnd(tool, result, 343 + index * 2));
+		}
+		projection.accept(toolStart(pendingFetch, 351));
+		const evidence = projection.accept(event({ type: "run_end", outcome: "success", timestamp: 352 }))!;
+
+		expect(evidence.recoveredFailures).toEqual([
+			expect.objectContaining({ id: failedSearch.id, recoveredById: recoveredSearch.id }),
+		]);
+		expect(evidence.openFailures).toEqual([
+			expect.objectContaining({ id: failedFetch.id, resolutionKey: expect.any(String) }),
+		]);
+		expect(evidence.pendingOperations).toContainEqual({
+			invocationId: pendingFetch.id,
+			toolName: "fetch",
+			startedSequence: expect.any(Number),
+			target: { kind: "opaque", value: "https://example.test/pending" },
+		});
+	});
+
 	it("keeps start-only Tool Invocations pending instead of fabricating failures", () => {
 		const projection = new RunEvidenceProjection();
 		projection.accept(event({ type: "run_start", source: "prompt", inputMessage: userMessage(), timestamp: 350 }));

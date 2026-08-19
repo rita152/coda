@@ -1,12 +1,22 @@
-import type { AgentTool } from "@coda/agent";
+import type { AgentTool, Clock } from "@coda/agent";
+import type { DiagnosticSink } from "@coda/tui";
 import type { FileSystem } from "../host/file-system.ts";
 import type { ProcessRunner } from "../host/process-runner.ts";
 import { createWorkspace } from "../host/workspace.ts";
+import type { SettingsStore } from "../settings/types.ts";
+import { createFetchTool } from "./fetch.ts";
 import { createFindTool } from "./find.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
 import { createReadTool } from "./read.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
+import {
+	createWebRuntime,
+	unavailableWebRuntime,
+	type WebHostnameResolver,
+	type WebPinnedFetch,
+} from "./web/runtime.ts";
+import { createWebSearchTool } from "./web-search.ts";
 
 /** Built-in `replaySafety: "safe"` Tools that can be constructed without a Prepared Run. */
 export async function createInterruptedToolRecoveryCatalog(options: {
@@ -15,12 +25,33 @@ export async function createInterruptedToolRecoveryCatalog(options: {
 	readonly processRunner: ProcessRunner;
 	readonly homeDirectory: string;
 	readonly environment: Readonly<Record<string, string | undefined>>;
+	readonly fetch: typeof globalThis.fetch;
+	readonly pinnedFetch?: WebPinnedFetch;
+	readonly resolveHostname: WebHostnameResolver;
+	readonly settings: SettingsStore;
+	readonly clock: Clock;
+	readonly diagnostics?: DiagnosticSink;
+	readonly sandboxMode?: () => "read-only" | "workspace-write" | "danger-full-access" | undefined;
 }): Promise<readonly AgentTool[]> {
 	const workspace = await createWorkspace(options.workspacePath, options.fileSystem);
 	const runtime = { homeDirectory: options.homeDirectory, environment: options.environment };
+	const web = options.pinnedFetch
+		? createWebRuntime({
+				fetch: options.fetch,
+				pinnedFetch: options.pinnedFetch,
+				settings: options.settings,
+				environment: options.environment,
+				clock: options.clock,
+				resolveHostname: options.resolveHostname,
+				...(options.sandboxMode ? { sandboxMode: options.sandboxMode } : {}),
+				...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
+			})
+		: unavailableWebRuntime;
 	return Object.freeze([
 		createReadTool(workspace, options.fileSystem),
 		createReadToolOutputTool({ fileSystem: options.fileSystem, homeDirectory: options.homeDirectory }),
+		createWebSearchTool(web),
+		createFetchTool(web),
 		createGrepTool({
 			workspace,
 			fileSystem: options.fileSystem,

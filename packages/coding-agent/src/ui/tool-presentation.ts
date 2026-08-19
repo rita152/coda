@@ -18,7 +18,7 @@ export interface ToolActionInvocation {
 }
 
 const MAIN_PREVIEW_ROWS = 5;
-const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "web_search", "fetch"]);
 
 // Main-Timeline geometry follows OpenAI Codex f93109615ff2. Coda retains its own Tool lifecycle,
 // ordering, and Transcript View semantics rather than translating Codex's scrollback cells.
@@ -87,11 +87,7 @@ export function renderToolInvocation(entry: TimelineToolEntry, options: ToolRend
 	];
 }
 
-function renderDelegatedChildren(
-	entry: TimelineToolEntry,
-	width: number,
-	options: ToolRenderOptions,
-): string[] {
+function renderDelegatedChildren(entry: TimelineToolEntry, width: number, options: ToolRenderOptions): string[] {
 	if (!entry.delegated || entry.delegated.length === 0) return [];
 	const lines: string[] = [];
 	for (const child of entry.delegated) {
@@ -162,6 +158,15 @@ function actionParts(invocation: ToolActionInvocation, completed: boolean): Tool
 		}
 		case "ls":
 			return { verb: completed ? "Explored" : "Exploring", subject: path };
+		case "web_search": {
+			const query = argumentString(arguments_, "query", "");
+			return { verb: completed ? "Searched" : "Searching", subject: `“${query}” on the web` };
+		}
+		case "fetch":
+			return {
+				verb: completed ? "Fetched" : "Fetching",
+				subject: argumentString(arguments_, "url", "(missing URL)"),
+			};
 		case "bash":
 			return {
 				verb: completed ? "Ran" : "Running",
@@ -208,6 +213,14 @@ function renderExplorationDetail(entry: TimelineToolEntry, width: number, theme:
 		case "ls":
 			verb = "List";
 			subject = path;
+			break;
+		case "web_search":
+			verb = "Search";
+			subject = `${argumentString(arguments_, "query", "")}${theme.style("muted", " on the web")}`;
+			break;
+		case "fetch":
+			verb = "Fetch";
+			subject = argumentString(arguments_, "url", "(missing URL)");
 			break;
 		default:
 			verb = "Run";
@@ -260,6 +273,14 @@ export function toolActionTitle(invocation: ToolActionInvocation, completed = fa
 		}
 		case "ls":
 			return `${completed ? "Explored" : "Exploring"} ${path}`;
+		case "web_search": {
+			const query = argumentString(arguments_, "query", "");
+			return `${completed ? "Searched" : "Searching"} “${query}” on the web`;
+		}
+		case "fetch": {
+			const url = argumentString(arguments_, "url", "(missing URL)");
+			return `${completed ? "Fetched" : "Fetching"} ${url}`;
+		}
 		case "process": {
 			const parts = processActionParts(arguments_, completed);
 			return `${parts.verb} ${parts.subject}`;

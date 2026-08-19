@@ -35,11 +35,21 @@
 		"@coda/sandbox": "0.1.0",
 		"@coda/skills": "0.1.0",
 		"@coda/tui": "0.1.0",
-		"sharp": "0.34.4"
+		"@mozilla/readability": "^0.6.0",
+		"fflate": "^0.8.3",
+		"jsdom": "^29.1.1",
+		"mammoth": "^1.12.1",
+		"pdfjs-dist": "^6.2.108",
+		"sharp": "0.34.4",
+		"turndown": "^7.2.4",
+		"turndown-plugin-gfm": "^1.0.2",
+		"undici": "^7.29.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
+		"@types/jsdom": "^30.0.0",
 		"@types/node": "24.12.4",
+		"@types/turndown": "^5.0.6",
 		"typescript": "5.9.3",
 		"vitest": "4.1.9"
 	},

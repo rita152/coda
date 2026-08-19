@@ -183,6 +183,78 @@ describe("FileSettingsStore", () => {
 		expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
 	});
 
+	it("round-trips strict non-secret Web settings", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-web-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "web-settings" },
+		});
+		const web = {
+			search: {
+				providers: ["brave", "tavily", "searxng", "duckduckgo"] as const,
+				timeoutMs: 8_000,
+				maxResults: 10,
+				maxCharacters: 24_000,
+				searxngEndpoint: "https://search.example.test/api/",
+			},
+			cache: { ttlMs: 120_000, maxEntries: 64, maxBytes: 4 * 1024 * 1024 },
+			fetch: { timeoutMs: 15_000, maxBytes: 8_000_000, maxCharacters: 100_000 },
+		};
+
+		await store.save({ web });
+
+		await expect(store.load()).resolves.toEqual({ web });
+		const serialized = await readFile(join(homeDirectory, ".coda", "settings.json"), "utf8");
+		expect(JSON.parse(serialized)).toEqual({ version: 1, web });
+		expect(serialized).not.toMatch(/apiKey|token|credential/iu);
+	});
+
+	it.each([
+		{ web: { search: { providers: ["unknown"] } } },
+		{ web: { search: { providers: ["tavily", "tavily"] } } },
+		{ web: { search: { timeoutMs: 0 } } },
+		{ web: { search: { searxngEndpoint: "https://user:secret@search.example.test" } } },
+		{ web: { cache: { maxEntries: 0 } } },
+		{ web: { cache: { maxBytes: 64 * 1024 * 1024 + 1 } } },
+		{ web: { fetch: { maxBytes: 50 * 1024 * 1024 + 1 } } },
+		{ web: { apiKey: "must-not-be-serialized" } },
+	])("rejects invalid or secret-bearing Web settings", async (settings) => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-invalid-web-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		await mkdir(join(homeDirectory, ".coda"));
+		await writeFile(join(homeDirectory, ".coda", "settings.json"), JSON.stringify({ version: 1, ...settings }));
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "unused" },
+		});
+
+		await expect(store.load()).rejects.toThrow("invalid Web settings");
+	});
+
+	it.each([
+		{ sandbox: { allowedDomains: ["*"] } },
+		{ sandbox: { allowedDomains: ["*.com"] } },
+		{ sandbox: { allowedDomains: ["https://example.test"] } },
+		{ sandbox: { allowedDomains: ["example.test:0"] } },
+		{ sandbox: { allowedDomains: ["2001:db8::1"] } },
+		{ sandbox: { deniedDomains: ["*:0"] } },
+	])("rejects Process Confinement domain patterns with ambiguous or overbroad authority", async (settings) => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-invalid-domain-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		await mkdir(join(homeDirectory, ".coda"));
+		await writeFile(join(homeDirectory, ".coda", "settings.json"), JSON.stringify({ version: 1, ...settings }));
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "unused" },
+		});
+
+		await expect(store.load()).rejects.toThrow("invalid Process Confinement settings");
+	});
+
 	it("round-trips source-labelled Custom Provider metadata without serializing Credentials", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-model-metadata-settings-"));
 		temporaryDirectories.push(homeDirectory);

@@ -12,6 +12,7 @@ import { createAtomicMutationWriter } from "./atomic-mutation-writer.ts";
 import { createBashTool } from "./bash.ts";
 import { BUILT_IN_CODING_TOOL_NAMES } from "./contracts.ts";
 import { createEditTool } from "./edit.ts";
+import { createFetchTool } from "./fetch.ts";
 import { createFindTool } from "./find.ts";
 import { createGrepTool } from "./grep.ts";
 import { createLsTool } from "./ls.ts";
@@ -19,6 +20,8 @@ import type { TargetMutationCoordinator } from "./mutation.ts";
 import { createReadTool } from "./read.ts";
 import { createReadSessionHistoryTool } from "./read-session-history.ts";
 import { createReadToolOutputTool } from "./read-tool-output.ts";
+import type { WebRuntime } from "./web/runtime.ts";
+import { createWebSearchTool } from "./web-search.ts";
 import { createWriteTool } from "./write.ts";
 
 type WorkspaceToolContribution = Awaited<ReturnType<WorkspaceExecution["tooling"]["tools"]>>[number];
@@ -33,6 +36,7 @@ export function createCodingToolContributions(options: {
 	readonly sessionHistory: SessionHistoryReadPort;
 	readonly sessionId: string;
 	readonly mutationCoordinator: TargetMutationCoordinator;
+	readonly web: WebRuntime;
 	readonly wrapScript?: (
 		request: Parameters<ProcessConfinement["wrapScript"]>[0],
 	) => Promise<Awaited<ReturnType<ProcessConfinement["wrapScript"]>> | undefined>;
@@ -43,6 +47,8 @@ export function createCodingToolContributions(options: {
 		createReadSessionHistoryTool(options.sessionHistory),
 		createReadTool(options.workspace, options.fileSystem),
 		createReadToolOutputTool({ fileSystem: options.fileSystem, homeDirectory: options.runtime.homeDirectory }),
+		createWebSearchTool(options.web),
+		createFetchTool(options.web),
 		createGrepTool({
 			workspace: options.workspace,
 			fileSystem: options.fileSystem,
@@ -77,6 +83,8 @@ export function createCodingToolContributions(options: {
 		["read_session_history", "read"],
 		["read", "read"],
 		["read_tool_output", "read"],
+		["web_search", "read"],
+		["fetch", "read"],
 		["grep", "read"],
 		["find", "read"],
 		["ls", "read"],

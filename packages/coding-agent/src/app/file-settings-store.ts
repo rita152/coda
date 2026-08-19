@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { isAbsolute, join } from "node:path";
 import type { IdGenerator } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
@@ -8,7 +9,12 @@ import { isFileSystemError } from "../host/file-system.ts";
 import { parseMcpServerConfigurations } from "../mcp/config.ts";
 import { parseCustomProviderModelConfig } from "../models/custom-model-metadata.ts";
 import { AUTH_API_PROTOCOLS } from "../models/types.ts";
-import type { SettingsStore, UserSettings } from "../settings/types.ts";
+import {
+	type SettingsStore,
+	type UserSettings,
+	WEB_SEARCH_PROVIDER_IDS,
+	type WebSearchProviderId,
+} from "../settings/types.ts";
 
 const REASONING_LEVELS = new Set<ThinkingLevel | "off">(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -31,6 +37,32 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
 	return Object.keys(value).every((key) => allowedKeys.has(key));
 }
 
+function validNetworkDomainPattern(value: string, allowDenyAll: boolean): boolean {
+	let host = value.trim().toLowerCase();
+	if (!host) return false;
+	if (host.startsWith("[")) {
+		const match = /^\[([^\]]+)\](?::([1-9]\d{0,4}))?$/u.exec(host);
+		if (!match?.[1] || isIP(match[1]) !== 6 || (match[2] && Number(match[2]) > 65_535)) return false;
+		return true;
+	}
+	const colons = host.match(/:/gu)?.length ?? 0;
+	if (colons > 1) return false;
+	if (colons === 1) {
+		const match = /^(.*):([1-9]\d{0,4})$/u.exec(host);
+		if (!match?.[1] || !match[2] || Number(match[2]) > 65_535) return false;
+		host = match[1];
+	}
+	if (host === "*") return allowDenyAll;
+	if (host.includes("://") || host.includes("/") || host.includes(":")) return false;
+	if (host === "localhost" || isIP(host) === 4) return true;
+	if (host.startsWith("*.")) {
+		const parts = host.slice(2).split(".");
+		return parts.length >= 2 && parts.every((part) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(part));
+	}
+	const parts = host.split(".");
+	return parts.length >= 2 && parts.every((part) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(part));
+}
+
 function validateSettings(value: unknown): UserSettings {
 	if (!isRecord(value) || value.version !== 1) throw new Error("Unsupported or invalid Coda settings format");
 	if (
@@ -46,6 +78,7 @@ function validateSettings(value: unknown): UserSettings {
 			"permission",
 			"sandbox",
 			"ui",
+			"web",
 		])
 	) {
 		throw new Error("Coda settings contain an unknown field");
@@ -236,10 +269,14 @@ function validateSettings(value: unknown): UserSettings {
 			(value.sandbox.enabled !== undefined && typeof value.sandbox.enabled !== "boolean") ||
 			(value.sandbox.allowedDomains !== undefined &&
 				(!Array.isArray(value.sandbox.allowedDomains) ||
-					value.sandbox.allowedDomains.some((entry) => typeof entry !== "string" || entry.length === 0))) ||
+					value.sandbox.allowedDomains.some(
+						(entry) => typeof entry !== "string" || !validNetworkDomainPattern(entry, false),
+					))) ||
 			(value.sandbox.deniedDomains !== undefined &&
 				(!Array.isArray(value.sandbox.deniedDomains) ||
-					value.sandbox.deniedDomains.some((entry) => typeof entry !== "string" || entry.length === 0)))
+					value.sandbox.deniedDomains.some(
+						(entry) => typeof entry !== "string" || !validNetworkDomainPattern(entry, true),
+					)))
 		) {
 			throw new Error("Coda settings contain invalid Process Confinement settings");
 		}
@@ -277,6 +314,86 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain duplicate Hook Trust records");
 		}
 	}
+	let web: UserSettings["web"];
+	if (value.web !== undefined) {
+		if (!isRecord(value.web) || !hasOnlyKeys(value.web, ["search", "cache", "fetch"])) {
+			throw new Error("Coda settings contain invalid Web settings");
+		}
+		let search: NonNullable<UserSettings["web"]>["search"];
+		if (value.web.search !== undefined) {
+			const candidate = value.web.search;
+			if (
+				!isRecord(candidate) ||
+				!hasOnlyKeys(candidate, ["providers", "timeoutMs", "maxResults", "maxCharacters", "searxngEndpoint"]) ||
+				(candidate.providers !== undefined &&
+					(!Array.isArray(candidate.providers) ||
+						candidate.providers.length === 0 ||
+						candidate.providers.some(
+							(provider) =>
+								typeof provider !== "string" ||
+								!(WEB_SEARCH_PROVIDER_IDS as readonly string[]).includes(provider),
+						) ||
+						new Set(candidate.providers).size !== candidate.providers.length)) ||
+				!validOptionalInteger(candidate.timeoutMs, 1, 120_000) ||
+				!validOptionalInteger(candidate.maxResults, 1, 20) ||
+				!validOptionalInteger(candidate.maxCharacters, 1, 100_000) ||
+				(candidate.searxngEndpoint !== undefined &&
+					(typeof candidate.searxngEndpoint !== "string" || !validProviderBaseUrl(candidate.searxngEndpoint)))
+			) {
+				throw new Error("Coda settings contain invalid Web settings");
+			}
+			search = {
+				...(candidate.providers ? { providers: [...candidate.providers] as WebSearchProviderId[] } : {}),
+				...(candidate.timeoutMs !== undefined ? { timeoutMs: candidate.timeoutMs as number } : {}),
+				...(candidate.maxResults !== undefined ? { maxResults: candidate.maxResults as number } : {}),
+				...(candidate.maxCharacters !== undefined ? { maxCharacters: candidate.maxCharacters as number } : {}),
+				...(candidate.searxngEndpoint !== undefined
+					? { searxngEndpoint: candidate.searxngEndpoint as string }
+					: {}),
+			};
+		}
+		let cache: NonNullable<UserSettings["web"]>["cache"];
+		if (value.web.cache !== undefined) {
+			const candidate = value.web.cache;
+			if (
+				!isRecord(candidate) ||
+				!hasOnlyKeys(candidate, ["ttlMs", "maxEntries", "maxBytes"]) ||
+				!validOptionalInteger(candidate.ttlMs, 1, 24 * 60 * 60_000) ||
+				!validOptionalInteger(candidate.maxEntries, 1, 1_024) ||
+				!validOptionalInteger(candidate.maxBytes, 1, 64 * 1024 * 1024)
+			) {
+				throw new Error("Coda settings contain invalid Web settings");
+			}
+			cache = {
+				...(candidate.ttlMs !== undefined ? { ttlMs: candidate.ttlMs as number } : {}),
+				...(candidate.maxEntries !== undefined ? { maxEntries: candidate.maxEntries as number } : {}),
+				...(candidate.maxBytes !== undefined ? { maxBytes: candidate.maxBytes as number } : {}),
+			};
+		}
+		let fetchSettings: NonNullable<UserSettings["web"]>["fetch"];
+		if (value.web.fetch !== undefined) {
+			const candidate = value.web.fetch;
+			if (
+				!isRecord(candidate) ||
+				!hasOnlyKeys(candidate, ["timeoutMs", "maxBytes", "maxCharacters"]) ||
+				!validOptionalInteger(candidate.timeoutMs, 1, 120_000) ||
+				!validOptionalInteger(candidate.maxBytes, 1, 50 * 1024 * 1024) ||
+				!validOptionalInteger(candidate.maxCharacters, 1, 500_000)
+			) {
+				throw new Error("Coda settings contain invalid Web settings");
+			}
+			fetchSettings = {
+				...(candidate.timeoutMs !== undefined ? { timeoutMs: candidate.timeoutMs as number } : {}),
+				...(candidate.maxBytes !== undefined ? { maxBytes: candidate.maxBytes as number } : {}),
+				...(candidate.maxCharacters !== undefined ? { maxCharacters: candidate.maxCharacters as number } : {}),
+			};
+		}
+		web = {
+			...(search ? { search } : {}),
+			...(cache ? { cache } : {}),
+			...(fetchSettings ? { fetch: fetchSettings } : {}),
+		};
+	}
 	if (value.ui !== undefined) {
 		if (
 			!isRecord(value.ui) ||
@@ -305,7 +422,15 @@ function validateSettings(value: unknown): UserSettings {
 		...(permission ? { permission } : {}),
 		...(sandbox ? { sandbox } : {}),
 		...(ui ? { ui } : {}),
+		...(web ? { web } : {}),
 	};
+}
+
+function validOptionalInteger(value: unknown, minimum: number, maximum: number): boolean {
+	return (
+		value === undefined ||
+		(typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum)
+	);
 }
 
 function validProviderBaseUrl(value: string): boolean {

@@ -410,6 +410,12 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 		arguments_.path.length > 0
 			? arguments_.path
 			: undefined;
+	const opaqueTarget =
+		toolName === "web_search" && typeof arguments_?.query === "string"
+			? arguments_.query
+			: toolName === "fetch" && typeof arguments_?.url === "string"
+				? arguments_.url
+				: undefined;
 	return {
 		invocationId: boundedText(invocation.id, MAX_ID_CHARACTERS),
 		toolName,
@@ -424,6 +430,11 @@ function toolSeed(value: unknown, order: number): ToolEvidence | undefined {
 		...(mutationPath !== undefined
 			? {
 					resolutionTarget: { kind: "path" as const, value: mutationPath },
+				}
+			: {}),
+		...(opaqueTarget !== undefined
+			? {
+					resolutionTarget: { kind: "opaque" as const, value: opaqueTarget },
 				}
 			: {}),
 		...(toolName === "bash" && typeof arguments_?.command === "string"

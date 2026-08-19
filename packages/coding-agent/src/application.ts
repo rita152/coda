@@ -8,6 +8,7 @@ import {
 	openProcessConfinement,
 	type ProcessConfinement,
 	processConfinementActive,
+	type SandboxMode,
 } from "@coda/sandbox";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
 import {
@@ -68,6 +69,12 @@ import type { SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
 import type { SettingsStore } from "./settings/types.ts";
 import type { SkillWatcherFactory } from "./skills/watcher.ts";
+import {
+	createWebRuntime,
+	unavailableWebRuntime,
+	type WebHostnameResolver,
+	type WebPinnedFetch,
+} from "./tools/web/runtime.ts";
 import { InteractiveCommandPermissionHandler } from "./ui/command-permission.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
@@ -104,6 +111,10 @@ export interface CodingAgentApplicationOptions {
 	readonly settings: SettingsStore;
 	readonly fileSystem: FileSystem;
 	readonly processRunner: ProcessRunner;
+	readonly fetch?: typeof globalThis.fetch;
+	/** Must accompany fetch and resolveHostname; incomplete Web transports fail closed. */
+	readonly pinnedFetch?: WebPinnedFetch;
+	readonly resolveHostname?: WebHostnameResolver;
 	readonly io: ApplicationIO;
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly runtime: ApplicationRuntime;
@@ -126,6 +137,8 @@ export interface CodingAgentApplicationOptions {
 	readonly mcpElicitation?: (request: McpAgentElicitation) => Promise<McpElicitationResult>;
 	readonly commandPermissionAsk?: CommandPermissionAsk;
 	readonly processConfinement?: ProcessConfinement;
+	/** Shared with host-owned interrupted Tool recovery so it observes the current Run authority. */
+	readonly sandboxModeState?: { current: SandboxMode };
 	/** Private deterministic seam for completion-gate integration tests. */
 	readonly completionWorkspaceEvidence?: CompletionWorkspaceEvidenceProvider;
 }
@@ -148,545 +161,570 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 	const providerManager =
 		providedOptions.providerManager ??
 		new ProviderManager({ models: providedOptions.models, fetch: unavailableProviderDiscoveryFetch });
+	const activeSandboxModeState = providedOptions.sandboxModeState ?? { current: "danger-full-access" as const };
+	const web =
+		providedOptions.fetch && providedOptions.pinnedFetch && providedOptions.resolveHostname
+			? createWebRuntime({
+					fetch: providedOptions.fetch,
+					pinnedFetch: providedOptions.pinnedFetch,
+					settings: options.settings,
+					environment: options.runtime.environment,
+					diagnostics: options.diagnostics,
+					clock: options.runtime.clock,
+					resolveHostname: providedOptions.resolveHostname,
+					sandboxMode: () => activeSandboxModeState.current,
+				})
+			: unavailableWebRuntime;
 	let providersRestored = false;
+	let precedingRun: Promise<void> = Promise.resolve();
 	return {
 		run: async (args) => {
+			const previousRun = precedingRun;
+			let releaseRun!: () => void;
+			precedingRun = new Promise<void>((resolve) => {
+				releaseRun = resolve;
+			});
+			await previousRun;
 			try {
-				const parsed = await parseArguments(args, options.io);
-				const configuredRunControl = runControlConfiguration(parsed);
-				if (configuredRunControl && !options.runtime.scheduler) {
-					throw new Error("Configured RunControl requires an injected Scheduler");
-				}
-				if (parsed.action === "help") {
-					await options.io.stdout.write(HELP);
-					return 0;
-				}
-				if (parsed.action === "version") {
-					await options.io.stdout.write("0.1.0\n");
-					return 0;
-				}
-				if (parsed.action === "skills-validate") {
-					return validateSkillPath(parsed.skillsPath!, options, parsed.output);
-				}
-				const maintenanceDiagnostics = createMaintenanceDiagnostics(options);
-				const cleanupExit = dispatchMaintenanceCleanup({
-					explicit: parsed.action === "cleanup",
-					output: parsed.output,
-					options,
-					diagnostics: maintenanceDiagnostics,
-				});
-				if (cleanupExit) return await cleanupExit;
-				if (parsed.action === "sessions") {
-					const { workspace, workspaceId } = await resolveWorkspaceContext(parsed.workspace, options);
-					const listed = { id: workspaceId, path: workspace.root };
-					const summaries = sessions.listSummaries
-						? await sessions.listSummaries(listed)
-						: (await sessions.list(listed)).map((descriptor) => summarizeSessionRecords(descriptor, []));
-					if (parsed.output === "json") {
-						for (const summary of summaries) {
-							await options.io.stdout.write(
-								`${JSON.stringify({
-									schemaVersion: 1,
-									type: "session",
-									title: summary.title,
-									updatedAt: summary.updatedAt,
-									promptCount: summary.promptCount,
-									...summary.descriptor,
-								})}\n`,
-							);
-						}
-					} else if (summaries.length === 0) {
-						await options.io.stdout.write("(no Sessions)\n");
-					} else {
-						for (const summary of summaries) {
-							await options.io.stdout.write(
-								`${summary.title}\t${summary.descriptor.id}\t${new Date(summary.updatedAt).toISOString()}\n`,
-							);
-						}
-					}
-					return 0;
-				}
-				if (parsed.mode === "print" && parsed.prompt.length === 0 && parsed.imagePaths.length === 0) {
-					throw new Error("Print mode requires a prompt or image");
-				}
-				let settings = await options.settings.load();
-				if (!providersRestored) {
-					providerManager.restore(settings.customProviders ?? []);
-					providersRestored = true;
-				}
-				const interactiveRuntime = createApplicationPromptRuntime(options, parsed, settings);
-				const { workspace, workspaceId, session } = await openWorkspaceSession({
-					path: parsed.workspace,
-					options,
-					sessions,
-					mode: parsed.mode,
-					resumeId: parsed.resumeId,
-					forceUnlock: parsed.forceUnlock,
-					persistent: parsed.persistSession || (parsed.mode === "interactive" && !parsed.noSession),
-				});
-				const workspaceDiffs = createWorkspaceDiffTracker({
-					processRunner: options.processRunner,
-					workspace: workspace.root,
-					environment: options.runtime.environment,
-				});
-				const workspaceResources = createWorkspaceSessionResources();
-				let closeProjectUi: (() => void) | undefined;
-				let sessionRuntime: OpenedSessionRuntime | undefined;
-				const closeRuntime = async (): Promise<void> => {
-					const failures: unknown[] = [];
-					try {
-						if (sessionRuntime) await sessionRuntime.close();
-						else await session.close();
-					} catch (error) {
-						failures.push(error);
-					}
-					try {
-						await workspaceResources.close();
-					} catch (error) {
-						failures.push(error);
-					}
-					if (failures.length === 1) throw failures[0];
-					if (failures.length > 1) {
-						throw new AggregateError(failures, "Could not close the application runtime");
-					}
-				};
 				try {
-					const initialModel = await selectInitialModel({
+					const parsed = await parseArguments(args, options.io);
+					const configuredRunControl = runControlConfiguration(parsed);
+					if (configuredRunControl && !options.runtime.scheduler) {
+						throw new Error("Configured RunControl requires an injected Scheduler");
+					}
+					if (parsed.action === "help") {
+						await options.io.stdout.write(HELP);
+						return 0;
+					}
+					if (parsed.action === "version") {
+						await options.io.stdout.write("0.1.0\n");
+						return 0;
+					}
+					if (parsed.action === "skills-validate") {
+						return validateSkillPath(parsed.skillsPath!, options, parsed.output);
+					}
+					const maintenanceDiagnostics = createMaintenanceDiagnostics(options);
+					const cleanupExit = dispatchMaintenanceCleanup({
+						explicit: parsed.action === "cleanup",
+						output: parsed.output,
 						options,
-						session,
-						settings,
-						requestedModel: parsed.model,
-						requestedReasoning: parsed.reasoning,
-						interactiveRuntime,
-					});
-					settings = initialModel.settings;
-					const { model, reasoning } = initialModel;
-					const projectInstructions = await loadProjectInstructions(workspace, options.fileSystem);
-					let projectTrust = projectTrustDecision({
-						workspace: workspace.root,
-						...(projectInstructions ? { instructions: projectInstructions } : {}),
-						settings,
-						authorized: false,
-					});
-					if (projectInstructions && !projectTrust.trusted) {
-						const trustedInteractively =
-							!parsed.trustProject && interactiveRuntime
-								? await confirmFromTerminal(
-										interactiveRuntime,
-										[
-											"Trust this project instruction file?",
-											`Path: ${projectInstructions.path}`,
-											`SHA-256: ${projectInstructions.sha256}`,
-											"The exact hash will be bound to this Workspace; any change requires review again.",
-											"",
-											"Content preview:",
-											projectInstructions.content.slice(0, 2_000),
-											...(projectInstructions.content.length > 2_000
-												? ["… (preview truncated; review the file at the path above)"]
-												: []),
-										].join("\n"),
-									)
-								: false;
-						projectTrust = projectTrustDecision({
-							workspace: workspace.root,
-							instructions: projectInstructions,
-							settings,
-							authorized: parsed.trustProject || trustedInteractively,
-						});
-						if (!projectTrust.trusted) {
-							throw new Error(
-								`AGENTS.md is untrusted or changed (${projectInstructions.sha256}); pass --trust-project after review`,
-							);
-						}
-						if (projectTrust.updatedSettings && projectTrust.trustRecord) {
-							settings = projectTrust.updatedSettings;
-							await options.settings.save(settings);
-							await session.record({ type: "project_trust_changed", trust: projectTrust.trustRecord });
-						}
-					}
-					const projectSkills = await loadProjectSkills({
-						workspace: workspace.root,
-						homeDirectory: options.runtime.homeDirectory,
-						fileSystem: options.fileSystem,
-					});
-					let mcpConfiguration = await inspectMcpConfiguration({
-						workspace: workspace.root,
-						fileSystem: options.fileSystem,
-						userServers: settings.mcpServers ?? [],
-						workspaceTrust: settings.workspaceMcpTrust ?? [],
-						environment: options.runtime.environment,
-					});
-					if (mcpConfiguration.workspace?.trust === "untrusted") {
-						const trustedInteractively =
-							!parsed.trustProjectMcp && interactiveRuntime
-								? await confirmFromTerminal(
-										interactiveRuntime,
-										workspaceMcpReviewText(mcpConfiguration.workspace),
-									)
-								: false;
-						const mcpTrust = mcpTrustDecision({
-							workspace: workspace.root,
-							snapshot: mcpConfiguration.workspace,
-							settings,
-							authorized: parsed.trustProjectMcp || trustedInteractively,
-						});
-						if (mcpTrust.updatedSettings && mcpTrust.trustRecord) {
-							settings = mcpTrust.updatedSettings;
-							await options.settings.save(settings);
-							await session.record({ type: "mcp_trust_changed", trust: mcpTrust.trustRecord });
-							mcpConfiguration = await inspectMcpConfiguration({
-								workspace: workspace.root,
-								fileSystem: options.fileSystem,
-								userServers: settings.mcpServers ?? [],
-								workspaceTrust: settings.workspaceMcpTrust ?? [],
-								environment: options.runtime.environment,
-							});
-						} else if (!mcpTrust.trusted && !interactiveRuntime) {
-							await options.io.stderr.write(
-								`coda: Workspace MCP configuration ${mcpConfiguration.workspace.sha256} is untrusted; its Servers were omitted\n`,
-							);
-						}
-					}
-					let hookConfiguration = await inspectHookConfiguration({
-						workspace: workspace.root,
-						homeDirectory: options.runtime.homeDirectory,
-						fileSystem: options.fileSystem,
-						trust: settings.hookTrust ?? [],
-					});
-					for (const diagnostic of hookConfiguration.diagnostics) {
-						await maintenanceDiagnostics({
-							code: diagnostic.code,
-							message: `${diagnostic.message}${diagnostic.path ? ` (${diagnostic.path})` : ""}`,
-						});
-					}
-					const untrustedHooks = hookConfiguration.handlers.filter(({ trust }) => trust === "untrusted");
-					if (untrustedHooks.length > 0) {
-						const trustedInteractively =
-							!parsed.trustHooks && interactiveRuntime
-								? await confirmFromTerminal(interactiveRuntime, hookReviewText(hookConfiguration))
-								: false;
-						if (parsed.trustHooks || trustedInteractively) {
-							settings = trustAllHooks(settings, hookConfiguration);
-							await options.settings.save(settings);
-							hookConfiguration = await inspectHookConfiguration({
-								workspace: workspace.root,
-								homeDirectory: options.runtime.homeDirectory,
-								fileSystem: options.fileSystem,
-								trust: settings.hookTrust ?? [],
-							});
-						} else if (!interactiveRuntime) {
-							await options.io.stderr.write(
-								`coda: ${untrustedHooks.length} untrusted Hook handler${untrustedHooks.length === 1 ? " was" : "s were"} omitted; pass --trust-hooks after review\n`,
-							);
-						}
-					}
-					const configuredShell = options.runtime.environment.SHELL;
-					const approvalPolicy = resolveApprovalPolicy({
-						cli: parsed.approvalPolicy,
-						noPermission: parsed.noPermission,
-						bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
-						settings: settings.permission,
-						interactive: parsed.mode === "interactive",
-					});
-					const sandboxModeState = {
-						current: resolveSandboxMode({
-							cli: parsed.sandboxMode,
-							noSandbox: parsed.noSandbox,
-							bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
-							settings: settings.sandbox,
-						}),
-					};
-					const sandboxMode = sandboxModeState.current;
-					const tmpdir = absoluteTmpdir(options.runtime.environment);
-					const settingsState = createApplicationSettingsState(settings);
-					const persistSettings = async (next: typeof settings): Promise<void> => {
-						settings = next;
-						settingsState.current = next;
-						await options.settings.save(next);
-					};
-					const permissionActive = parsed.mode === "interactive" || parsed.strictPermissions === true;
-					const commandHooks = new CommandLifecycleHookHost({
-						configuration: hookConfiguration,
-						processRunner: options.processRunner,
-						shellExecutable: configuredShell?.startsWith("/") ? configuredShell : "/bin/sh",
-						platform: options.runtime.platform,
-						environment: options.runtime.environment,
-						permissionMode: permissionActive ? "default" : "bypassPermissions",
-						diagnostic: maintenanceDiagnostics,
-					});
-					const interactivePermission =
-						parsed.mode === "interactive" && !options.commandPermissionAsk
-							? new InteractiveCommandPermissionHandler()
-							: undefined;
-					const permissionPolicy = createCommandPermissionPolicy(
-						commandPermissionOptionsFor(
-							approvalPolicy,
-							sandboxMode,
-							workspace.root,
-							(settings.permission?.remembered ?? []).filter(
-								(record) =>
-									record.scope === "user" ||
-									(record.scope === "workspace" && record.workspace === workspace.root),
-							),
-							{ tmpdir, filesystemEnforced: !processConfinementActive(sandboxMode) },
-						),
-					);
-					const lifecycleHooks = new PermissionLifecycleHookHost({
-						inner: commandHooks,
-						policy: permissionPolicy,
-						ask:
-							options.commandPermissionAsk ??
-							(interactivePermission
-								? (request) => interactivePermission.request(request)
-								: async () => ({
-										action: "deny",
-										reason: "Command Permission requires an interactive Session",
-									})),
-						onRemember: async (record) => {
-							if (record.scope !== "user" && record.scope !== "workspace") return;
-							const retained = (settings.permission?.remembered ?? []).filter(
-								(entry) => entry.key !== record.key || entry.workspace !== record.workspace,
-							);
-							await persistSettings({
-								...settings,
-								permission: {
-									...settings.permission,
-									approvalPolicy: permissionPolicy.snapshot().approvalPolicy,
-									remembered: [...retained, record],
-								},
-							});
-						},
-					});
-					workspaceResources.useLifecycleHooks(lifecycleHooks);
-					const confinementHolder: { current?: ProcessConfinement } = {
-						current: options.processConfinement,
-					};
-					const ownsConfinement = options.wrapScript === undefined && options.processConfinement === undefined;
-					if (!confinementHolder.current && ownsConfinement && processConfinementActive(sandboxMode)) {
-						try {
-							confinementHolder.current = await openProcessConfinement({
-								platform: options.runtime.platform,
-								config: {
-									workspace: workspace.root,
-									mode: sandboxMode,
-									...(settings.sandbox?.allowedDomains
-										? { allowedDomains: settings.sandbox.allowedDomains }
-										: {}),
-									...(settings.sandbox?.deniedDomains
-										? { deniedDomains: settings.sandbox.deniedDomains }
-										: {}),
-									...(tmpdir ? { tmpdir } : {}),
-								},
-								engine: createAnthropicSandboxEngine(),
-							});
-						} catch (error) {
-							await maintenanceDiagnostics({
-								code: "sandbox.unavailable",
-								message: error instanceof Error ? error.message : String(error),
-							});
-						}
-					}
-					if (confinementHolder.current) workspaceResources.useProcessConfinement(confinementHolder.current);
-					permissionPolicy.configure({
-						filesystemEnforced:
-							!processConfinementActive(sandboxModeState.current) ||
-							confinementHolder.current !== undefined ||
-							options.wrapScript !== undefined,
-					});
-					const wrapScript = options.wrapScript ?? createLiveWrapScript(confinementHolder);
-					const sessionOptions = {
-						...options,
-						wrapScript,
-					};
-					const permissionBounds = () => ({
-						tmpdir,
-						filesystemEnforced:
-							!processConfinementActive(sandboxModeState.current) ||
-							confinementHolder.current !== undefined ||
-							options.wrapScript !== undefined,
-					});
-					const permissionsCommand = createPermissionsCommand({
-						policy: permissionPolicy,
-						workspace: workspace.root,
-						sandboxMode: sandboxModeState,
-						bounds: permissionBounds,
-						...(ownsConfinement
-							? {
-									replaceConfinement: async (mode) => {
-										try {
-											await replaceProcessConfinement({
-												holder: confinementHolder,
-												mode,
-												workspace: workspace.root,
-												platform: options.runtime.platform,
-												engine: createAnthropicSandboxEngine(),
-												resources: workspaceResources,
-												...(settings.sandbox?.allowedDomains
-													? { allowedDomains: settings.sandbox.allowedDomains }
-													: {}),
-												...(settings.sandbox?.deniedDomains
-													? { deniedDomains: settings.sandbox.deniedDomains }
-													: {}),
-												...(tmpdir ? { tmpdir } : {}),
-											});
-										} catch (error) {
-											await maintenanceDiagnostics({
-												code: "sandbox.unavailable",
-												message: error instanceof Error ? error.message : String(error),
-											});
-										}
-									},
-								}
-							: {}),
-					});
-					const projectServices = await openProjectServices({
-						options,
-						settings: settingsState,
-						workspace,
-						mcpConfiguration,
-						skills: projectSkills,
-						interactive: interactiveRuntime !== undefined,
 						diagnostics: maintenanceDiagnostics,
-						resources: workspaceResources,
-						hooks: commandHooks,
 					});
-					closeProjectUi = projectServices.closeUi;
-					const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand, hooksCommand } = projectServices;
-					const skillsManager = projectSkills.manager;
-					const skillsSnapshot = projectSkills.snapshot;
-					const auth = await authenticateInitialModel({
-						options,
-						model,
-						apiKey: parsed.apiKey,
-						interactiveRuntime,
-						imageCount: parsed.imagePaths.length,
-					});
-					const interactiveMcpElicitation =
-						parsed.mode === "interactive" && !options.mcpElicitation
-							? new InteractiveMcpElicitationHandler()
-							: undefined;
-					const primaryMcpElicitation =
-						options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
-					const openedWorkspace = await openWorkspaceRuntime({
-						createWorkCoordinator: createWorkspaceWorkCoordinator,
-						options: sessionOptions,
-						resources: workspaceResources,
-						sessions,
-						workspace,
-						workspaceId,
-						mode: parsed.mode,
-						forceUnlock: parsed.forceUnlock,
-						maxTurns: parsed.maxTurns,
-						disableRunBudget: parsed.disableRunBudget,
-						maxOutputTokens: parsed.maxOutputTokens,
-						skillsManager,
-						mcpRegistry,
-						projectInstructions,
-						lifecycleHooks,
-					});
-					const activeProcessSessionManager = openedWorkspace.processSessionManager;
-					const inputResources = openedWorkspace.inputResources;
-					const activeWorkCoordinator = openedWorkspace.coordinator;
-					sessionRuntime = await openSessionRuntime({
-						options,
-						coordinator: activeWorkCoordinator,
-						session,
-						model,
-						reasoning,
-						authSnapshot: auth,
-						mcpElicitation: primaryMcpElicitation,
-						runControl: configuredRunControl,
-						workspaceDiffs,
-						mode: parsed.mode,
-					});
-					const agentRuntime = sessionRuntime.work;
-					const mediaLibrary = sessionRuntime.mediaLibrary;
-					const restoredMedia = sessionRuntime.restoredMedia;
-					const initialAttachmentIds: string[] = [];
-					for (const path of parsed.imagePaths) {
-						initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
+					if (cleanupExit) return await cleanupExit;
+					if (parsed.action === "sessions") {
+						const { workspace, workspaceId } = await resolveWorkspaceContext(parsed.workspace, options);
+						const listed = { id: workspaceId, path: workspace.root };
+						const summaries = sessions.listSummaries
+							? await sessions.listSummaries(listed)
+							: (await sessions.list(listed)).map((descriptor) => summarizeSessionRecords(descriptor, []));
+						if (parsed.output === "json") {
+							for (const summary of summaries) {
+								await options.io.stdout.write(
+									`${JSON.stringify({
+										schemaVersion: 1,
+										type: "session",
+										title: summary.title,
+										updatedAt: summary.updatedAt,
+										promptCount: summary.promptCount,
+										...summary.descriptor,
+									})}\n`,
+								);
+							}
+						} else if (summaries.length === 0) {
+							await options.io.stdout.write("(no Sessions)\n");
+						} else {
+							for (const summary of summaries) {
+								await options.io.stdout.write(
+									`${summary.title}\t${summary.descriptor.id}\t${new Date(summary.updatedAt).toISOString()}\n`,
+								);
+							}
+						}
+						return 0;
 					}
-					const initialInput = await prepareUserPrompt({
-						text: parsed.prompt,
-						attachmentIds: initialAttachmentIds,
-						mediaLibrary,
-						skills: skillsSnapshot,
-						...(mcpRegistry ? { mcpRegistry } : {}),
+					if (parsed.mode === "print" && parsed.prompt.length === 0 && parsed.imagePaths.length === 0) {
+						throw new Error("Print mode requires a prompt or image");
+					}
+					let settings = await options.settings.load();
+					activeSandboxModeState.current = resolveSandboxMode({
+						cli: parsed.sandboxMode,
+						noSandbox: parsed.noSandbox,
+						bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
+						settings: settings.sandbox,
 					});
-					const prepareAttachments = createAttachmentPreparer({
-						restoredMedia,
-						mediaLibrary,
-						session,
-						inputResources,
+					if (!providersRestored) {
+						providerManager.restore(settings.customProviders ?? []);
+						providersRestored = true;
+					}
+					const interactiveRuntime = createApplicationPromptRuntime(options, parsed, settings);
+					const { workspace, workspaceId, session } = await openWorkspaceSession({
+						path: parsed.workspace,
+						options,
+						sessions,
+						mode: parsed.mode,
+						resumeId: parsed.resumeId,
+						forceUnlock: parsed.forceUnlock,
+						persistent: parsed.persistSession || (parsed.mode === "interactive" && !parsed.noSession),
 					});
-					if (parsed.mode === "interactive") {
-						return await runInteractiveApplication({
-							options: {
-								...options,
-								wrapScript: sessionOptions.wrapScript,
-								...(interactivePermission ? { commandPermission: interactivePermission } : {}),
+					const workspaceDiffs = createWorkspaceDiffTracker({
+						processRunner: options.processRunner,
+						workspace: workspace.root,
+						environment: options.runtime.environment,
+					});
+					const workspaceResources = createWorkspaceSessionResources();
+					let closeProjectUi: (() => void) | undefined;
+					let sessionRuntime: OpenedSessionRuntime | undefined;
+					const closeRuntime = async (): Promise<void> => {
+						const failures: unknown[] = [];
+						try {
+							if (sessionRuntime) await sessionRuntime.close();
+							else await session.close();
+						} catch (error) {
+							failures.push(error);
+						}
+						try {
+							await workspaceResources.close();
+						} catch (error) {
+							failures.push(error);
+						}
+						if (failures.length === 1) throw failures[0];
+						if (failures.length > 1) {
+							throw new AggregateError(failures, "Could not close the application runtime");
+						}
+					};
+					try {
+						const initialModel = await selectInitialModel({
+							options,
+							session,
+							settings,
+							requestedModel: parsed.model,
+							requestedReasoning: parsed.reasoning,
+							interactiveRuntime,
+						});
+						settings = initialModel.settings;
+						const { model, reasoning } = initialModel;
+						const projectInstructions = await loadProjectInstructions(workspace, options.fileSystem);
+						let projectTrust = projectTrustDecision({
+							workspace: workspace.root,
+							...(projectInstructions ? { instructions: projectInstructions } : {}),
+							settings,
+							authorized: false,
+						});
+						if (projectInstructions && !projectTrust.trusted) {
+							const trustedInteractively =
+								!parsed.trustProject && interactiveRuntime
+									? await confirmFromTerminal(
+											interactiveRuntime,
+											[
+												"Trust this project instruction file?",
+												`Path: ${projectInstructions.path}`,
+												`SHA-256: ${projectInstructions.sha256}`,
+												"The exact hash will be bound to this Workspace; any change requires review again.",
+												"",
+												"Content preview:",
+												projectInstructions.content.slice(0, 2_000),
+												...(projectInstructions.content.length > 2_000
+													? ["… (preview truncated; review the file at the path above)"]
+													: []),
+											].join("\n"),
+										)
+									: false;
+							projectTrust = projectTrustDecision({
+								workspace: workspace.root,
+								instructions: projectInstructions,
+								settings,
+								authorized: parsed.trustProject || trustedInteractively,
+							});
+							if (!projectTrust.trusted) {
+								throw new Error(
+									`AGENTS.md is untrusted or changed (${projectInstructions.sha256}); pass --trust-project after review`,
+								);
+							}
+							if (projectTrust.updatedSettings && projectTrust.trustRecord) {
+								settings = projectTrust.updatedSettings;
+								await options.settings.save(settings);
+								await session.record({ type: "project_trust_changed", trust: projectTrust.trustRecord });
+							}
+						}
+						const projectSkills = await loadProjectSkills({
+							workspace: workspace.root,
+							homeDirectory: options.runtime.homeDirectory,
+							fileSystem: options.fileSystem,
+						});
+						let mcpConfiguration = await inspectMcpConfiguration({
+							workspace: workspace.root,
+							fileSystem: options.fileSystem,
+							userServers: settings.mcpServers ?? [],
+							workspaceTrust: settings.workspaceMcpTrust ?? [],
+							environment: options.runtime.environment,
+						});
+						if (mcpConfiguration.workspace?.trust === "untrusted") {
+							const trustedInteractively =
+								!parsed.trustProjectMcp && interactiveRuntime
+									? await confirmFromTerminal(
+											interactiveRuntime,
+											workspaceMcpReviewText(mcpConfiguration.workspace),
+										)
+									: false;
+							const mcpTrust = mcpTrustDecision({
+								workspace: workspace.root,
+								snapshot: mcpConfiguration.workspace,
+								settings,
+								authorized: parsed.trustProjectMcp || trustedInteractively,
+							});
+							if (mcpTrust.updatedSettings && mcpTrust.trustRecord) {
+								settings = mcpTrust.updatedSettings;
+								await options.settings.save(settings);
+								await session.record({ type: "mcp_trust_changed", trust: mcpTrust.trustRecord });
+								mcpConfiguration = await inspectMcpConfiguration({
+									workspace: workspace.root,
+									fileSystem: options.fileSystem,
+									userServers: settings.mcpServers ?? [],
+									workspaceTrust: settings.workspaceMcpTrust ?? [],
+									environment: options.runtime.environment,
+								});
+							} else if (!mcpTrust.trusted && !interactiveRuntime) {
+								await options.io.stderr.write(
+									`coda: Workspace MCP configuration ${mcpConfiguration.workspace.sha256} is untrusted; its Servers were omitted\n`,
+								);
+							}
+						}
+						let hookConfiguration = await inspectHookConfiguration({
+							workspace: workspace.root,
+							homeDirectory: options.runtime.homeDirectory,
+							fileSystem: options.fileSystem,
+							trust: settings.hookTrust ?? [],
+						});
+						for (const diagnostic of hookConfiguration.diagnostics) {
+							await maintenanceDiagnostics({
+								code: diagnostic.code,
+								message: `${diagnostic.message}${diagnostic.path ? ` (${diagnostic.path})` : ""}`,
+							});
+						}
+						const untrustedHooks = hookConfiguration.handlers.filter(({ trust }) => trust === "untrusted");
+						if (untrustedHooks.length > 0) {
+							const trustedInteractively =
+								!parsed.trustHooks && interactiveRuntime
+									? await confirmFromTerminal(interactiveRuntime, hookReviewText(hookConfiguration))
+									: false;
+							if (parsed.trustHooks || trustedInteractively) {
+								settings = trustAllHooks(settings, hookConfiguration);
+								await options.settings.save(settings);
+								hookConfiguration = await inspectHookConfiguration({
+									workspace: workspace.root,
+									homeDirectory: options.runtime.homeDirectory,
+									fileSystem: options.fileSystem,
+									trust: settings.hookTrust ?? [],
+								});
+							} else if (!interactiveRuntime) {
+								await options.io.stderr.write(
+									`coda: ${untrustedHooks.length} untrusted Hook handler${untrustedHooks.length === 1 ? " was" : "s were"} omitted; pass --trust-hooks after review\n`,
+								);
+							}
+						}
+						const configuredShell = options.runtime.environment.SHELL;
+						const approvalPolicy = resolveApprovalPolicy({
+							cli: parsed.approvalPolicy,
+							noPermission: parsed.noPermission,
+							bypassApprovalsAndSandbox: parsed.bypassApprovalsAndSandbox,
+							settings: settings.permission,
+							interactive: parsed.mode === "interactive",
+						});
+						const sandboxModeState = activeSandboxModeState;
+						const sandboxMode = sandboxModeState.current;
+						const tmpdir = absoluteTmpdir(options.runtime.environment);
+						const settingsState = createApplicationSettingsState(settings);
+						const persistSettings = async (next: typeof settings): Promise<void> => {
+							settings = next;
+							settingsState.current = next;
+							await options.settings.save(next);
+						};
+						const permissionActive = parsed.mode === "interactive" || parsed.strictPermissions === true;
+						const commandHooks = new CommandLifecycleHookHost({
+							configuration: hookConfiguration,
+							processRunner: options.processRunner,
+							shellExecutable: configuredShell?.startsWith("/") ? configuredShell : "/bin/sh",
+							platform: options.runtime.platform,
+							environment: options.runtime.environment,
+							permissionMode: permissionActive ? "default" : "bypassPermissions",
+							diagnostic: maintenanceDiagnostics,
+						});
+						const interactivePermission =
+							parsed.mode === "interactive" && !options.commandPermissionAsk
+								? new InteractiveCommandPermissionHandler()
+								: undefined;
+						const permissionPolicy = createCommandPermissionPolicy(
+							commandPermissionOptionsFor(
+								approvalPolicy,
+								sandboxMode,
+								workspace.root,
+								(settings.permission?.remembered ?? []).filter(
+									(record) =>
+										record.scope === "user" ||
+										(record.scope === "workspace" && record.workspace === workspace.root),
+								),
+								{ tmpdir, filesystemEnforced: !processConfinementActive(sandboxMode) },
+							),
+						);
+						const lifecycleHooks = new PermissionLifecycleHookHost({
+							inner: commandHooks,
+							policy: permissionPolicy,
+							ask:
+								options.commandPermissionAsk ??
+								(interactivePermission
+									? (request) => interactivePermission.request(request)
+									: async () => ({
+											action: "deny",
+											reason: "Command Permission requires an interactive Session",
+										})),
+							onRemember: async (record) => {
+								if (record.scope !== "user" && record.scope !== "workspace") return;
+								const retained = (settings.permission?.remembered ?? []).filter(
+									(entry) => entry.key !== record.key || entry.workspace !== record.workspace,
+								);
+								await persistSettings({
+									...settings,
+									permission: {
+										...settings.permission,
+										approvalPolicy: permissionPolicy.snapshot().approvalPolicy,
+										remembered: [...retained, record],
+									},
+								});
 							},
-							providerManager,
+						});
+						workspaceResources.useLifecycleHooks(lifecycleHooks);
+						const confinementHolder: { current?: ProcessConfinement } = {
+							current: options.processConfinement,
+						};
+						const ownsConfinement = options.wrapScript === undefined && options.processConfinement === undefined;
+						if (!confinementHolder.current && ownsConfinement && processConfinementActive(sandboxMode)) {
+							try {
+								confinementHolder.current = await openProcessConfinement({
+									platform: options.runtime.platform,
+									config: {
+										workspace: workspace.root,
+										mode: sandboxMode,
+										...(settings.sandbox?.allowedDomains
+											? { allowedDomains: settings.sandbox.allowedDomains }
+											: {}),
+										...(settings.sandbox?.deniedDomains
+											? { deniedDomains: settings.sandbox.deniedDomains }
+											: {}),
+										...(tmpdir ? { tmpdir } : {}),
+									},
+									engine: createAnthropicSandboxEngine(),
+								});
+							} catch (error) {
+								await maintenanceDiagnostics({
+									code: "sandbox.unavailable",
+									message: error instanceof Error ? error.message : String(error),
+								});
+							}
+						}
+						if (confinementHolder.current) workspaceResources.useProcessConfinement(confinementHolder.current);
+						permissionPolicy.configure({
+							filesystemEnforced:
+								!processConfinementActive(sandboxModeState.current) ||
+								confinementHolder.current !== undefined ||
+								options.wrapScript !== undefined,
+						});
+						const wrapScript = options.wrapScript ?? createLiveWrapScript(confinementHolder);
+						const sessionOptions = {
+							...options,
+							wrapScript,
+							web,
+						};
+						const permissionBounds = () => ({
+							tmpdir,
+							filesystemEnforced:
+								!processConfinementActive(sandboxModeState.current) ||
+								confinementHolder.current !== undefined ||
+								options.wrapScript !== undefined,
+						});
+						const permissionsCommand = createPermissionsCommand({
+							policy: permissionPolicy,
+							workspace: workspace.root,
+							sandboxMode: sandboxModeState,
+							bounds: permissionBounds,
+							...(ownsConfinement
+								? {
+										replaceConfinement: async (mode) => {
+											try {
+												await replaceProcessConfinement({
+													holder: confinementHolder,
+													mode,
+													workspace: workspace.root,
+													platform: options.runtime.platform,
+													engine: createAnthropicSandboxEngine(),
+													resources: workspaceResources,
+													...(settings.sandbox?.allowedDomains
+														? { allowedDomains: settings.sandbox.allowedDomains }
+														: {}),
+													...(settings.sandbox?.deniedDomains
+														? { deniedDomains: settings.sandbox.deniedDomains }
+														: {}),
+													...(tmpdir ? { tmpdir } : {}),
+												});
+											} catch (error) {
+												await maintenanceDiagnostics({
+													code: "sandbox.unavailable",
+													message: error instanceof Error ? error.message : String(error),
+												});
+											}
+										},
+									}
+								: {}),
+						});
+						const projectServices = await openProjectServices({
+							options,
 							settings: settingsState,
+							workspace,
+							mcpConfiguration,
+							skills: projectSkills,
+							interactive: interactiveRuntime !== undefined,
+							diagnostics: maintenanceDiagnostics,
+							resources: workspaceResources,
+							hooks: commandHooks,
+						});
+						closeProjectUi = projectServices.closeUi;
+						const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand, hooksCommand } = projectServices;
+						const skillsManager = projectSkills.manager;
+						const skillsSnapshot = projectSkills.snapshot;
+						const auth = await authenticateInitialModel({
+							options,
+							model,
+							apiKey: parsed.apiKey,
+							interactiveRuntime,
+							imageCount: parsed.imagePaths.length,
+						});
+						const interactiveMcpElicitation =
+							parsed.mode === "interactive" && !options.mcpElicitation
+								? new InteractiveMcpElicitationHandler()
+								: undefined;
+						const primaryMcpElicitation =
+							options.mcpElicitation ?? interactiveMcpElicitation?.forSession(session.descriptor.id);
+						const openedWorkspace = await openWorkspaceRuntime({
+							createWorkCoordinator: createWorkspaceWorkCoordinator,
+							options: sessionOptions,
+							resources: workspaceResources,
 							sessions,
 							workspace,
 							workspaceId,
-							session,
-							work: agentRuntime,
-							mediaLibrary,
-							restoredMedia,
-							inputResources,
-							processSessionManager: activeProcessSessionManager,
-							coordinator: activeWorkCoordinator,
+							mode: parsed.mode,
+							forceUnlock: parsed.forceUnlock,
+							maxTurns: parsed.maxTurns,
+							disableRunBudget: parsed.disableRunBudget,
+							maxOutputTokens: parsed.maxOutputTokens,
 							skillsManager,
-							skillsSnapshot,
-							skillsCommand,
-							mcpCommand,
-							...(mcpRegistry ? { mcpRegistry } : {}),
-							hooksCommand,
-							permissionsCommand,
-							commandRegistry,
+							mcpRegistry,
+							projectInstructions,
+							lifecycleHooks,
+						});
+						const activeProcessSessionManager = openedWorkspace.processSessionManager;
+						const inputResources = openedWorkspace.inputResources;
+						const activeWorkCoordinator = openedWorkspace.coordinator;
+						sessionRuntime = await openSessionRuntime({
+							options,
+							coordinator: activeWorkCoordinator,
+							session,
 							model,
 							reasoning,
-							apiKey: parsed.apiKey,
+							authSnapshot: auth,
+							mcpElicitation: primaryMcpElicitation,
 							runControl: configuredRunControl,
-							interactiveRuntime: interactiveRuntime!,
-							mcpElicitation: interactiveMcpElicitation,
 							workspaceDiffs,
-							initialInput,
-							initialAttachmentIds,
-							noAnimations: parsed.noAnimations,
+							mode: parsed.mode,
 						});
+						const agentRuntime = sessionRuntime.work;
+						const mediaLibrary = sessionRuntime.mediaLibrary;
+						const restoredMedia = sessionRuntime.restoredMedia;
+						const initialAttachmentIds: string[] = [];
+						for (const path of parsed.imagePaths) {
+							initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
+						}
+						const initialInput = await prepareUserPrompt({
+							text: parsed.prompt,
+							attachmentIds: initialAttachmentIds,
+							mediaLibrary,
+							skills: skillsSnapshot,
+							...(mcpRegistry ? { mcpRegistry } : {}),
+						});
+						const prepareAttachments = createAttachmentPreparer({
+							restoredMedia,
+							mediaLibrary,
+							session,
+							inputResources,
+						});
+						if (parsed.mode === "interactive") {
+							return await runInteractiveApplication({
+								options: {
+									...options,
+									wrapScript: sessionOptions.wrapScript,
+									...(interactivePermission ? { commandPermission: interactivePermission } : {}),
+								},
+								providerManager,
+								settings: settingsState,
+								sessions,
+								workspace,
+								workspaceId,
+								session,
+								work: agentRuntime,
+								mediaLibrary,
+								restoredMedia,
+								inputResources,
+								processSessionManager: activeProcessSessionManager,
+								coordinator: activeWorkCoordinator,
+								skillsManager,
+								skillsSnapshot,
+								skillsCommand,
+								mcpCommand,
+								...(mcpRegistry ? { mcpRegistry } : {}),
+								hooksCommand,
+								permissionsCommand,
+								commandRegistry,
+								model,
+								reasoning,
+								apiKey: parsed.apiKey,
+								runControl: configuredRunControl,
+								interactiveRuntime: interactiveRuntime!,
+								mcpElicitation: interactiveMcpElicitation,
+								workspaceDiffs,
+								initialInput,
+								initialAttachmentIds,
+								noAnimations: parsed.noAnimations,
+							});
+						}
+						return await runPrint({
+							work: agentRuntime,
+							session,
+							input: initialInput,
+							attachmentIds: initialAttachmentIds,
+							prepareAttachments,
+							mediaLibrary,
+							output: parsed.output,
+							jsonEventStream: parsed.jsonEventStream,
+							includeMediaData: parsed.includeMediaData,
+							io: options.io,
+							processRunner: options.processRunner,
+							fileSystem: options.fileSystem,
+							workspace: workspace.root,
+							environment: options.runtime.environment,
+							clock: options.runtime.clock,
+							completionWorkspaceEvidence: options.completionWorkspaceEvidence,
+							runControl: sessionRuntime.runControl,
+							drainWorkspaceDiffSupplements: workspaceDiffs.drain,
+						});
+					} finally {
+						closeProjectUi?.();
+						await closeRuntime();
 					}
-					return await runPrint({
-						work: agentRuntime,
-						session,
-						input: initialInput,
-						attachmentIds: initialAttachmentIds,
-						prepareAttachments,
-						mediaLibrary,
-						output: parsed.output,
-						jsonEventStream: parsed.jsonEventStream,
-						includeMediaData: parsed.includeMediaData,
-						io: options.io,
-						processRunner: options.processRunner,
-						fileSystem: options.fileSystem,
-						workspace: workspace.root,
-						environment: options.runtime.environment,
-						clock: options.runtime.clock,
-						completionWorkspaceEvidence: options.completionWorkspaceEvidence,
-						runControl: sessionRuntime.runControl,
-						drainWorkspaceDiffSupplements: workspaceDiffs.drain,
-					});
-				} finally {
-					closeProjectUi?.();
-					await closeRuntime();
+				} catch (error) {
+					if (error instanceof InteractiveTerminationError) return error.exitCode;
+					const message = error instanceof Error ? error.message : String(error);
+					await options.io.stderr.write(`coda: ${message}\n`);
+					return 1;
 				}
-			} catch (error) {
-				if (error instanceof InteractiveTerminationError) return error.exitCode;
-				const message = error instanceof Error ? error.message : String(error);
-				await options.io.stderr.write(`coda: ${message}\n`);
-				return 1;
+			} finally {
+				releaseRun();
 			}
 		},
 	};

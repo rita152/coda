@@ -29,6 +29,8 @@ describe("Command Permission policy", () => {
 		const policy = createCommandPermissionPolicy({ approvalPolicy: "untrusted" });
 		expect(policy.decide(request("read", { path: "README.md" }))).toEqual({ kind: "allow" });
 		expect(policy.decide(request("grep", { pattern: "TODO" }))).toEqual({ kind: "allow" });
+		expect(policy.decide(request("web_search", { query: "latest release" }))).toEqual({ kind: "allow" });
+		expect(policy.decide(request("fetch", { url: "https://example.test/release" }))).toEqual({ kind: "allow" });
 		expect(policy.decide(request("bash", { command: "ls" }))).toEqual({ kind: "allow" });
 		expect(policy.decide(request("bash", { command: "ls && pwd" }))).toEqual({ kind: "allow" });
 		expect(policy.decide(request("bash", { command: "npm test" }))).toEqual({

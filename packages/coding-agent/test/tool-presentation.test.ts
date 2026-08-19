@@ -3,7 +3,7 @@ import { displayWidth, stripAnsi } from "@coda/tui";
 import { describe, expect, it } from "vitest";
 import type { TimelineToolEntry, TimelineToolState } from "../src/ui/semantic-timeline.ts";
 import { createCodaTheme } from "../src/ui/theme.ts";
-import { renderExplorationGroup, renderToolInvocation } from "../src/ui/tool-presentation.ts";
+import { isExplorationTool, renderExplorationGroup, renderToolInvocation } from "../src/ui/tool-presentation.ts";
 
 describe("Tool Invocation presentation", () => {
 	it.each([
@@ -11,6 +11,8 @@ describe("Tool Invocation presentation", () => {
 		["grep", { pattern: "TODO", path: "src" }, "Searched “TODO” in src"],
 		["find", { pattern: "*.ts", path: "." }, "Explored *.ts in ."],
 		["ls", { path: "src" }, "Explored src"],
+		["web_search", { query: "latest release" }, "Searched “latest release” on the web"],
+		["fetch", { url: "https://example.test/release" }, "Fetched https://example.test/release"],
 		["edit", { path: "src/a.ts", oldText: "a", newText: "b" }, "Edited src/a.ts"],
 		["write", { path: "new.ts", content: "hello" }, "Wrote new.ts"],
 		["process", { action: "start", command: "npm test" }, "Started npm test"],
@@ -25,6 +27,11 @@ describe("Tool Invocation presentation", () => {
 			theme: createCodaTheme(0),
 		});
 		expect(stripAnsi(lines[0] ?? "")).toContain(expected);
+	});
+
+	it("classifies Web reads as exploration Tools", () => {
+		expect(isExplorationTool(toolEntry("web_search", { query: "latest release" }))).toBe(true);
+		expect(isExplorationTool(toolEntry("fetch", { url: "https://example.test/release" }))).toBe(true);
 	});
 
 	it("uses a compact tree, keeps a five-row head/tail preview, and strips hostile controls", () => {

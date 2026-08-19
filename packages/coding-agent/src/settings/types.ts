@@ -7,6 +7,30 @@ import type { McpServerConfiguration, WorkspaceMcpTrustRecord } from "../mcp/con
 import type { ModelSelection } from "../models/model-selection.ts";
 import type { CustomProviderConfig } from "../models/types.ts";
 
+export const WEB_SEARCH_PROVIDER_IDS = ["brave", "tavily", "searxng", "duckduckgo"] as const;
+
+export type WebSearchProviderId = (typeof WEB_SEARCH_PROVIDER_IDS)[number];
+
+export interface WebSettings {
+	readonly search?: {
+		readonly providers?: readonly WebSearchProviderId[];
+		readonly timeoutMs?: number;
+		readonly maxResults?: number;
+		readonly maxCharacters?: number;
+		readonly searxngEndpoint?: string;
+	};
+	readonly cache?: {
+		readonly ttlMs?: number;
+		readonly maxEntries?: number;
+		readonly maxBytes?: number;
+	};
+	readonly fetch?: {
+		readonly timeoutMs?: number;
+		readonly maxBytes?: number;
+		readonly maxCharacters?: number;
+	};
+}
+
 export interface ProjectTrustRecord {
 	readonly workspace: string;
 	readonly path: string;
@@ -36,6 +60,7 @@ export interface UserSettings {
 		readonly motion?: "full" | "reduced";
 		readonly colorScheme?: TerminalColorScheme;
 	};
+	readonly web?: WebSettings;
 }
 
 export interface SettingsStore {

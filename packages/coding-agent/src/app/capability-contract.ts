@@ -143,15 +143,21 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "Built-in Tools",
 		summary:
-			"Workspace-relative and absolute-path reading, search, atomic single-file create-or-replace and exact-text edit, direct host Shell execution, and recoverable continuation of omitted Tool output.",
+			"Workspace-relative and absolute-path reading and search; multi-Provider Web search with timeout, fallback, deduplication, and bounded caching; clean URL fetching for HTML, structured text, Feeds, images, and common documents; atomic single-file create-or-replace and exact-text edit; direct host Shell execution; and recoverable continuation of omitted Tool output.",
 		sources: [
 			"packages/coding-agent/src/tools/index.ts",
 			"packages/coding-agent/src/tools/mutation-contract.ts",
+			"packages/coding-agent/src/tools/web-search.ts",
+			"packages/coding-agent/src/tools/fetch.ts",
+			"packages/coding-agent/src/tools/web/runtime.ts",
 			"packages/coding-agent/src/process/tools.ts",
 		],
 		tests: [
 			"packages/coding-agent/test/read-tool.test.ts",
 			"packages/coding-agent/test/search-tools.test.ts",
+			"packages/coding-agent/test/web-search-tool.test.ts",
+			"packages/coding-agent/test/fetch-tool.test.ts",
+			"packages/coding-agent/test/web-tools.test.ts",
 			"packages/coding-agent/test/mutation-tools.test.ts",
 			"packages/coding-agent/test/process-tools.test.ts",
 			"packages/coding-agent/test/bash-tool.test.ts",

@@ -35,7 +35,15 @@ describe("@coda/coding-agent package contract", () => {
 			"@coda/sandbox": "0.1.0",
 			"@coda/skills": "0.1.0",
 			"@coda/tui": "0.1.0",
+			"@mozilla/readability": "^0.6.0",
+			fflate: "^0.8.3",
+			jsdom: "^29.1.1",
+			mammoth: "^1.12.1",
+			"pdfjs-dist": "^6.2.108",
 			sharp: "0.34.4",
+			turndown: "^7.2.4",
+			"turndown-plugin-gfm": "^1.0.2",
+			undici: "^7.29.0",
 		});
 		expect(packageJson.scripts.build).toContain("node scripts/mark-bin-executable.mjs dist/bin.js");
 	});

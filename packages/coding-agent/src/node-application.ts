@@ -1,11 +1,15 @@
 import { randomInt, randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP, type LookupFunction } from "node:net";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import { type CredentialStore, createModels, createSystemTimeRuntime, type MutableModels } from "@coda/ai";
 import { opencodeGoProvider } from "@coda/ai/providers/opencode-go";
 import { createSdkMcpConnector, type McpConnector } from "@coda/mcp";
+import type { SandboxMode } from "@coda/sandbox";
 import { createSystemScheduler, ProcessTerminal, type Scheduler, type Terminal } from "@coda/tui";
+import { Agent as UndiciAgent } from "undici";
 import { FileSettingsStore } from "./app/file-settings-store.ts";
 import {
 	type ApplicationIO,
@@ -32,6 +36,7 @@ import { interruptedToolRecoveryChoices } from "./session/session-recovery.ts";
 import type { SessionManager } from "./session/types.ts";
 import { createNodeSkillWatcherFactory, type SkillWatcherFactory } from "./skills/watcher.ts";
 import { createInterruptedToolRecoveryCatalog } from "./tools/recovery-catalog.ts";
+import type { WebHostnameResolver, WebPinnedFetch } from "./tools/web/runtime.ts";
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import type { InteractiveProcessLifecycle, InteractiveTerminationSignal } from "./ui/process-lifecycle.ts";
 import { selectFromTerminal } from "./ui/prompts.ts";
@@ -123,6 +128,50 @@ export function terminalEnvironmentForStartup(
 	return noColor ? Object.freeze({ ...environment, NO_COLOR: environment.NO_COLOR ?? "1" }) : environment;
 }
 
+/** Node transport adapter that pins one request to its prevalidated DNS result. */
+export function createNodePinnedFetch(fetchAdapter: typeof globalThis.fetch): WebPinnedFetch {
+	return async (url, init, addresses) => {
+		const records = [...new Set(addresses)].map((address) => ({ address, family: isIP(address) }));
+		if (records.length === 0 || records.some(({ family }) => family === 0)) {
+			throw new Error("Pinned Web request requires at least one valid IP address");
+		}
+		const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
+			const requestedFamily =
+				lookupOptions.family === 4 || lookupOptions.family === "IPv4"
+					? 4
+					: lookupOptions.family === 6 || lookupOptions.family === "IPv6"
+						? 6
+						: 0;
+			const candidates = requestedFamily ? records.filter(({ family }) => family === requestedFamily) : records;
+			const selected = candidates[0];
+			if (!selected) {
+				const error = Object.assign(new Error("No pinned address matches the requested address family"), {
+					code: "ENOTFOUND",
+				});
+				callback(error, "", 0);
+				return;
+			}
+			if (lookupOptions.all) callback(null, candidates);
+			else callback(null, selected.address, selected.family);
+		};
+		const dispatcher = new UndiciAgent({ connect: { lookup: pinnedLookup } });
+		try {
+			const response = await fetchAdapter(url, {
+				...init,
+				// The Web Runtime owns redirect validation and pins every hop separately.
+				redirect: "manual",
+				dispatcher,
+			} as RequestInit);
+			// Graceful close waits for the caller to consume or cancel the response body.
+			void dispatcher.close().catch(() => undefined);
+			return response;
+		} catch (error) {
+			await dispatcher.destroy(error instanceof Error ? error : new Error(String(error))).catch(() => undefined);
+			throw error;
+		}
+	};
+}
+
 export interface NodeCodingAgentApplicationOptions {
 	readonly stdin?: NodeJS.ReadStream;
 	readonly stdout?: NodeJS.WriteStream;
@@ -146,6 +195,9 @@ export interface NodeCodingAgentApplicationOptions {
 	readonly sessions?: SessionManager;
 	readonly interactiveLifecycle?: InteractiveProcessLifecycle;
 	readonly fetch?: typeof globalThis.fetch;
+	/** Required with a custom fetch to keep host Web access DNS-pinned; otherwise Web Tools fail closed. */
+	readonly pinnedFetch?: WebPinnedFetch;
+	readonly resolveHostname?: WebHostnameResolver;
 	readonly skillWatcher?: SkillWatcherFactory;
 	readonly mcpConnector?: McpConnector;
 }
@@ -175,6 +227,12 @@ export function createNodeCodingAgentApplication(
 	const fileSystem = options.fileSystem ?? createNodeFileSystem();
 	const processRunner = options.processRunner ?? createNodeProcessRunner({ platform });
 	const processSessionRunner = options.processSessionRunner ?? createNodeProcessSessionRunner({ platform });
+	const fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+	const pinnedFetch = options.pinnedFetch ?? (options.fetch ? undefined : createNodePinnedFetch(fetch));
+	const resolveHostname =
+		options.resolveHostname ??
+		(async (hostname: string) =>
+			(await lookup(hostname, { all: true, verbatim: true })).map(({ address }) => address));
 	const credentials =
 		options.credentialStore ??
 		createNodeCredentialStore({
@@ -212,9 +270,10 @@ export function createNodeCodingAgentApplication(
 			return registry;
 		})();
 	const settings = options.settings ?? new FileSettingsStore({ fileSystem, homeDirectory, idGenerator });
+	const sandboxModeState: { current: SandboxMode } = { current: "danger-full-access" };
 	const providerManager = new ProviderManager({
 		models,
-		fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+		fetch,
 	});
 	let activeTerminal: Terminal | undefined;
 	const terminalFactory: TerminalFactory = {
@@ -272,6 +331,13 @@ export function createNodeCodingAgentApplication(
 						processRunner,
 						homeDirectory,
 						environment,
+						fetch,
+						...(pinnedFetch ? { pinnedFetch } : {}),
+						settings,
+						clock,
+						resolveHostname,
+						sandboxMode: () => sandboxModeState.current,
+						diagnostics: diagnosticOutput,
 					}),
 				interruptedToolRecovery: async ({ invocation, runId, startedAt }) => {
 					if (!activeTerminal) {
@@ -312,7 +378,7 @@ export function createNodeCodingAgentApplication(
 		mcpConnector:
 			options.mcpConnector ??
 			createSdkMcpConnector({
-				fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
+				fetch,
 				onError: (serverId, error) => {
 					void diagnosticOutput({
 						code: "mcp.protocol-error",
@@ -322,6 +388,10 @@ export function createNodeCodingAgentApplication(
 				},
 			}),
 		settings,
+		fetch,
+		...(pinnedFetch ? { pinnedFetch } : {}),
+		resolveHostname,
+		sandboxModeState,
 		fileSystem,
 		processRunner,
 		processSessionRunner,
