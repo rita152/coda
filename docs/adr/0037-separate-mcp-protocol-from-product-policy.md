@@ -18,7 +18,7 @@ the leaf package can deeply hide version negotiation, transports, discovery,
 subscriptions, MRTR, Schema validation, result normalization, and connection
 recovery without exporting product behavior or a speculative Extension model.
 
-The current production scope is a Tools-only MCP Host based on the official TypeScript SDK v2. Protocol revision 2026-07-28 is canonical; Streamable HTTP may auto-negotiate and stdio defaults to an explicit modern pin, while 2025-11-25 and 2025-06-18 remain tested compatibility paths. Legacy HTTP+SSE and the deprecated Roots, Sampling, and Logging features are excluded, as are Resources, Prompts, and complete OAuth.
+The current production scope is a Tools-only MCP Host based on the official TypeScript SDK v2. Protocol revision 2026-07-28 is canonical; native Streamable HTTP Definitions may auto-negotiate and native stdio Definitions default to an explicit modern pin, while 2025-11-25 and 2025-06-18 remain tested compatibility paths. Portable Agent Plugin declarations carry a transport but no wire-version policy, so the Coding Agent maps their stdio and Streamable HTTP Servers to automatic negotiation across those supported revisions. Legacy HTTP+SSE and the deprecated Roots, Sampling, and Logging features are excluded, as are Resources, Prompts, and complete OAuth.
 
 Each configured Server has stable local identity, faults independently, and
 contributes namespaced Tools through a revision-bound lease. Every Run retains

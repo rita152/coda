@@ -7,10 +7,15 @@ import { skillIdFromCommandId } from "../commands/skill-extensions.ts";
 import type { ApplicationIO } from "../host/application-io.ts";
 import type { FileSystem } from "../host/file-system.ts";
 import type { WorkspaceMcpConfigurationSnapshot, WorkspaceMcpTrustRecord } from "../mcp/config.ts";
+import type { CodingPluginMcpSource } from "../plugins/types.ts";
 import type { ComposerExtensionReference } from "../session/composer-submission.ts";
 import type { TrustedProjectInstructions } from "../settings/project-context.ts";
 import type { ProjectTrustRecord, UserSettings } from "../settings/types.ts";
 import type { CodingSkillsSnapshot } from "../skills/types.ts";
+
+function compareText(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
 
 export interface ProjectTrustDecision {
 	readonly trusted: boolean;
@@ -74,9 +79,11 @@ export function mcpTrustDecision(input: {
 		updatedSettings: {
 			...input.settings,
 			workspaceMcpTrust: [
-				...(input.settings.workspaceMcpTrust ?? []).filter((entry) => entry.workspace !== input.workspace),
+				...(input.settings.workspaceMcpTrust ?? []).filter(
+					(entry) => entry.workspace !== input.workspace || entry.path !== input.snapshot?.path,
+				),
 				trustRecord,
-			].sort((left, right) => left.workspace.localeCompare(right.workspace)),
+			].sort((left, right) => compareText(left.workspace, right.workspace) || compareText(left.path, right.path)),
 		},
 	};
 }
@@ -101,6 +108,35 @@ export function workspaceMcpReviewText(snapshot: WorkspaceMcpConfigurationSnapsh
 			"",
 			...serverPreview,
 			...(snapshot.servers.length > serverPreview.length ? ["… (Server preview truncated)"] : []),
+		].join("\n"),
+	);
+}
+
+export function workspacePluginMcpReviewText(source: CodingPluginMcpSource): string {
+	const rawByName = new Map(source.plugin.snapshot.mcpServers.map((server) => [server.name, server] as const));
+	const serverPreview = source.servers.slice(0, 50).map((server) => {
+		const configuration = rawByName.get(server.name)?.configuration;
+		const target =
+			configuration?.type === "stdio"
+				? `${configuration.command} ${(configuration.args ?? []).join(" ")}`.trim()
+				: configuration?.type === "streamable-http"
+					? configuration.url
+					: server.type;
+		return `- ${server.id} (${server.type}): ${target}`;
+	});
+	return sanitizeTerminalText(
+		[
+			"Trust this Workspace Agent Plugin MCP configuration?",
+			`Plugin: ${source.plugin.snapshot.manifest.name} (${source.plugin.slot})`,
+			`Path: ${source.path}`,
+			`SHA-256: ${source.sha256}`,
+			`Servers: ${source.servers.length}`,
+			"The exact mcp.json hash is stored separately; any change requires review again.",
+			"Trusting a stdio Server allows Coda to launch its configured executable and call its Tools.",
+			"Agent Plugin header values are visible package data and are not a portable secret mechanism.",
+			"",
+			...serverPreview,
+			...(source.servers.length > serverPreview.length ? ["… (Server preview truncated)"] : []),
 		].join("\n"),
 	);
 }

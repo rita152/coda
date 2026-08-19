@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createMcpHost, createSdkMcpConnector } from "../src/index.ts";
+import { redirectSafeFetch } from "../src/sdk-connector.ts";
 
 const serverInfo = { name: "wire-fixture", version: "1.0.0" };
 
@@ -41,6 +42,136 @@ const definition = {
 };
 
 describe("official SDK wire bounds", () => {
+	it("keeps client-generated authorization and MCP headers ahead of configured HTTP headers", async () => {
+		const observed: Headers[] = [];
+		const fetch: typeof globalThis.fetch = async (_input, init) => {
+			observed.push(new Headers(init?.headers));
+			const message = requestMessage(init);
+			if (message.method === "server/discover") return discover(message.id);
+			if (message.method === "tools/list") return completeResult(message.id, { tools: [] });
+			return completeResult(message.id, {});
+		};
+		const host = createMcpHost({ connector: createSdkMcpConnector({ fetch }) });
+
+		try {
+			await host.reload([
+				{
+					...definition,
+					transport: {
+						...definition.transport,
+						headers: {
+							Authorization: "Configured package data",
+							"MCP-Protocol-Version": "configured-version",
+							"MCP-Methodology": "retained-methodology",
+							"MCP-Session-Id-Extension": "retained-extension",
+						},
+						bearerToken: async () => "client-owned-token",
+					},
+				},
+			]);
+
+			expect(observed.length).toBeGreaterThan(0);
+			expect(observed.every((headers) => headers.get("authorization") === "Bearer client-owned-token")).toBe(true);
+			expect(observed[0]!.get("mcp-protocol-version")).toBe("2026-07-28");
+			expect(observed.every((headers) => headers.get("mcp-methodology") === "retained-methodology")).toBe(true);
+			expect(observed.every((headers) => headers.get("mcp-session-id-extension") === "retained-extension")).toBe(
+				true,
+			);
+		} finally {
+			await host.close();
+		}
+	});
+
+	it("follows redirects without forwarding configured headers to a different origin", async () => {
+		const redirectedHeaders: Headers[] = [];
+		const fetch: typeof globalThis.fetch = async (input, init) => {
+			const url = new URL(input instanceof Request ? input.url : input);
+			if (url.origin === "https://wire.example.test") {
+				expect(init?.redirect).toBe("manual");
+				return new Response(null, {
+					status: 307,
+					headers: { location: "https://other.example.test/mcp" },
+				});
+			}
+			redirectedHeaders.push(new Headers(init?.headers));
+			const message = requestMessage(init);
+			if (message.method === "server/discover") return discover(message.id);
+			if (message.method === "tools/list") return completeResult(message.id, { tools: [] });
+			return completeResult(message.id, {});
+		};
+		const host = createMcpHost({ connector: createSdkMcpConnector({ fetch }) });
+
+		try {
+			const snapshot = await host.reload([
+				{
+					...definition,
+					transport: {
+						...definition.transport,
+						headers: { "X-Plugin-Tenant": "public-package-value" },
+					},
+				},
+			]);
+
+			expect(snapshot.servers[0]).toMatchObject({ status: "ready" });
+			expect(redirectedHeaders.length).toBeGreaterThan(0);
+			expect(redirectedHeaders.every((headers) => !headers.has("x-plugin-tenant"))).toBe(true);
+			expect(redirectedHeaders.every((headers) => !headers.has("mcp-session-id"))).toBe(true);
+		} finally {
+			await host.close();
+		}
+	});
+
+	it("does not forward MCP session or resumption state across origins", async () => {
+		const redirectedHeaders: Headers[] = [];
+		const fetch: typeof globalThis.fetch = async (input, init) => {
+			const url = new URL(input instanceof Request ? input.url : input);
+			if (url.origin === "https://wire.example.test") {
+				return new Response(null, {
+					status: 307,
+					headers: { location: "https://other.example.test/mcp" },
+				});
+			}
+			redirectedHeaders.push(new Headers(init?.headers));
+			return new Response(null, { status: 204 });
+		};
+		const safeFetch = redirectSafeFetch(fetch, []);
+
+		await safeFetch("https://wire.example.test/mcp", {
+			method: "POST",
+			headers: {
+				"MCP-Session-Id": "client-session-secret",
+				"Last-Event-ID": "client-resumption-secret",
+			},
+		});
+
+		expect(redirectedHeaders).toHaveLength(1);
+		expect(redirectedHeaders[0]?.has("mcp-session-id")).toBe(false);
+		expect(redirectedHeaders[0]?.has("last-event-id")).toBe(false);
+	});
+
+	it("rejects a redirect that downgrades a public endpoint to HTTP", async () => {
+		const requested: string[] = [];
+		const fetch: typeof globalThis.fetch = async (input) => {
+			requested.push(input instanceof Request ? input.url : input.toString());
+			return new Response(null, {
+				status: 307,
+				headers: { location: "http://public.example.test/mcp" },
+			});
+		};
+		const host = createMcpHost({ connector: createSdkMcpConnector({ fetch }) });
+
+		try {
+			const snapshot = await host.reload([definition]);
+
+			expect(snapshot.servers).toEqual([
+				expect.objectContaining({ status: "degraded", error: expect.stringContaining("downgrade") }),
+			]);
+			expect(requested).toEqual(["https://wire.example.test/mcp"]);
+		} finally {
+			await host.close();
+		}
+	});
+
 	it("rejects invalid limit combinations at construction", () => {
 		expect(() => createSdkMcpConnector({ limits: { listMaxPages: 0 } })).toThrow("listMaxPages");
 		expect(() => createSdkMcpConnector({ limits: { callTimeoutMs: 100, callTotalTimeoutMs: 50 } })).toThrow(

@@ -1,6 +1,7 @@
 import type { Clock } from "@coda/agent";
 import type { Api, AuthResult, Model, MutableModels, ThinkingLevel } from "@coda/ai";
-import { createMcpHost, type McpConnector } from "@coda/mcp";
+import { createMcpHost, type McpConnector, type McpServerDefinition } from "@coda/mcp";
+import type { SkillsSnapshot } from "@coda/skills";
 import type { DiagnosticSink, Keybinding, Scheduler, Terminal, TerminalColorScheme } from "@coda/tui";
 import { createCoreCommandRegistry } from "../commands/core-commands.ts";
 import { McpCommandRegistryBinding } from "../commands/mcp-extensions.ts";
@@ -18,7 +19,7 @@ import type { Session } from "../session/types.ts";
 import type { SettingsStore, UserSettings } from "../settings/types.ts";
 import { CodingSkillsManager } from "../skills/manager.ts";
 import { collectSkillRoots } from "../skills/roots.ts";
-import type { CodingSkillsSnapshot } from "../skills/types.ts";
+import type { CodingSkillOrigin, CodingSkillsSnapshot } from "../skills/types.ts";
 import type { SkillWatcherFactory } from "../skills/watcher.ts";
 import type { FullScreenOutputGate } from "../ui/full-screen-output.ts";
 import type { InteractiveProcessLifecycle } from "../ui/process-lifecycle.ts";
@@ -135,16 +136,32 @@ export interface ProjectSkills {
 	readonly roots: Awaited<ReturnType<typeof collectSkillRoots>>;
 	readonly manager: CodingSkillsManager;
 	readonly snapshot: CodingSkillsSnapshot;
+	readonly plugins?: ProjectPluginSource;
+}
+
+export interface ProjectPluginSource {
+	readonly watchRoots: readonly string[];
+	skillSnapshots(): readonly SkillsSnapshot<CodingSkillOrigin>[];
+	refresh(): Promise<void>;
+	mcpDefinitions(input: {
+		readonly settings: UserSettings;
+		readonly reservedServerIds: readonly string[];
+	}): Promise<readonly McpServerDefinition[]>;
 }
 
 export async function loadProjectSkills(input: {
 	readonly workspace: string;
 	readonly homeDirectory: string;
 	readonly fileSystem: FileSystem;
+	readonly plugins?: ProjectPluginSource;
 }): Promise<ProjectSkills> {
 	const roots = await collectSkillRoots({ workspace: input.workspace, homeDirectory: input.homeDirectory });
-	const manager = new CodingSkillsManager({ fileSystem: input.fileSystem, roots });
-	return { roots, manager, snapshot: await manager.refresh() };
+	const manager = new CodingSkillsManager({
+		fileSystem: input.fileSystem,
+		roots,
+		...(input.plugins ? { supplementalSnapshots: () => input.plugins!.skillSnapshots() } : {}),
+	});
+	return { roots, manager, snapshot: await manager.refresh(), ...(input.plugins ? { plugins: input.plugins } : {}) };
 }
 
 export interface ProjectServices {
@@ -212,11 +229,13 @@ export async function openProjectServices(input: {
 		}
 		if (input.interactive && input.options.skillWatcher) {
 			skillWatcher = input.options.skillWatcher.watch(
-				input.skills.roots.map(({ path }) => path),
+				[...new Set([...input.skills.roots.map(({ path }) => path), ...(input.skills.plugins?.watchRoots ?? [])])],
 				() => {
-					input.skills.manager.markDirty();
-					void input.skills.manager
-						.refresh({ rescan: false })
+					void Promise.resolve(input.skills.plugins?.refresh())
+						.then(() => {
+							input.skills.manager.markDirty();
+							return input.skills.manager.refresh({ rescan: false });
+						})
 						.then((snapshot) => {
 							if (!skillUiClosed) skillRegistryBinding!.sync(input.skills.manager.current ?? snapshot);
 						})
@@ -233,7 +252,9 @@ export async function openProjectServices(input: {
 			);
 		}
 		const refreshSkills = async (): Promise<CodingSkillsSnapshot> => {
-			const snapshot = await input.skills.manager.refresh();
+			await input.skills.plugins?.refresh();
+			input.skills.manager.markDirty();
+			const snapshot = await input.skills.manager.refresh({ rescan: false });
 			const current = input.skills.manager.current ?? snapshot;
 			skillRegistryBinding!.sync(current);
 			return current;
@@ -242,19 +263,34 @@ export async function openProjectServices(input: {
 			host: mcpRegistry?.snapshot() ?? Object.freeze({ revision: 0, servers: [], tools: [], diagnostics: [] }),
 			...(mcpConfiguration.workspace ? { workspace: mcpConfiguration.workspace } : {}),
 		});
-		const reloadMcp = async () => {
+		const executeMcpReload = async () => {
 			const latestSettings = await input.options.settings.load();
 			input.settings.current = {
 				...input.settings.current,
 				mcpServers: latestSettings.mcpServers,
 				workspaceMcpTrust: latestSettings.workspaceMcpTrust,
 			};
-			mcpConfiguration = await inspectMcpConfiguration({
+			const nativeMcpConfiguration = await inspectMcpConfiguration({
 				workspace: input.workspace.root,
 				fileSystem: input.options.fileSystem,
 				userServers: input.settings.current.mcpServers ?? [],
 				workspaceTrust: input.settings.current.workspaceMcpTrust ?? [],
 				environment: input.options.runtime.environment,
+			});
+			await input.skills.plugins?.refresh();
+			if (input.skills.plugins) {
+				input.skills.manager.markDirty();
+				const refreshedSkills = await input.skills.manager.refresh({ rescan: false });
+				skillRegistryBinding?.sync(input.skills.manager.current ?? refreshedSkills);
+			}
+			const pluginDefinitions =
+				(await input.skills.plugins?.mcpDefinitions({
+					settings: input.settings.current,
+					reservedServerIds: nativeMcpConfiguration.definitions.map(({ id }) => id),
+				})) ?? [];
+			mcpConfiguration = Object.freeze({
+				...nativeMcpConfiguration,
+				definitions: Object.freeze([...nativeMcpConfiguration.definitions, ...pluginDefinitions]),
 			});
 			if (!mcpRegistry) {
 				if (mcpConfiguration.definitions.length > 0) {
@@ -265,6 +301,15 @@ export async function openProjectServices(input: {
 			await mcpRegistry.reload(mcpConfiguration.definitions);
 			mcpRegistryBinding?.sync(mcpRegistry.snapshot());
 			return mcpCommandSnapshot();
+		};
+		let mcpReloadTail: Promise<void> = Promise.resolve();
+		const reloadMcp = () => {
+			const operation = mcpReloadTail.then(executeMcpReload);
+			mcpReloadTail = operation.then(
+				() => undefined,
+				() => undefined,
+			);
+			return operation;
 		};
 		return {
 			...(mcpRegistry ? { mcpRegistry } : {}),

@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
 import type { McpConnector, McpElicitationResult } from "@coda/mcp";
@@ -31,6 +32,7 @@ import {
 	createApplicationSettingsState,
 	loadProjectSkills,
 	openProjectServices,
+	type ProjectPluginSource,
 	selectInitialModel,
 } from "./app/project-runtime.ts";
 import {
@@ -38,6 +40,7 @@ import {
 	projectTrustDecision,
 	validateSkillPath,
 	workspaceMcpReviewText,
+	workspacePluginMcpReviewText,
 } from "./app/trust-gating.ts";
 import {
 	createMaintenanceDiagnostics,
@@ -62,6 +65,8 @@ import { inspectMcpConfiguration } from "./mcp/config.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
 import type { ModelCapabilityResolver } from "./models/model-capabilities.ts";
 import { ProviderManager } from "./models/provider-manager.ts";
+import { createCodingPluginsManager, materializeCodingPluginMcpDefinitions } from "./plugins/inventory.ts";
+import type { CodingPluginMcpDiagnostic, CodingPluginsSnapshot } from "./plugins/types.ts";
 import { createWorkspaceWorkCoordinator } from "./runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { summarizeSessionRecords } from "./session/session-summary.ts";
@@ -345,10 +350,85 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								await session.record({ type: "project_trust_changed", trust: projectTrust.trustRecord });
 							}
 						}
+						const pluginDiscoveryOptions = {
+							workspace: workspace.root,
+							userHome: options.runtime.homeDirectory,
+							dataRoot: join(options.runtime.homeDirectory, ".coda", "plugin-data"),
+							fileSystem: options.fileSystem,
+						};
+						const codingPluginsManager = createCodingPluginsManager(pluginDiscoveryOptions);
+						let codingPlugins: CodingPluginsSnapshot = await codingPluginsManager.refresh();
+						const reportPluginDiagnostics = async (
+							diagnostics: CodingPluginsSnapshot["diagnostics"] | readonly CodingPluginMcpDiagnostic[],
+						): Promise<void> => {
+							for (const diagnostic of diagnostics) {
+								const path = "path" in diagnostic ? diagnostic.path : undefined;
+								await maintenanceDiagnostics({
+									code: `plugins.${diagnostic.code}`,
+									message: `${diagnostic.message}${path ? ` (${path})` : ""}`,
+								});
+							}
+						};
+						await reportPluginDiagnostics(codingPlugins.diagnostics);
+						const pluginSource: ProjectPluginSource = Object.freeze({
+							watchRoots: Object.freeze([
+								join(workspace.root, ".agents", "plugins"),
+								join(options.runtime.homeDirectory, ".agents", "plugins"),
+							]),
+							skillSnapshots: () => codingPlugins.skills,
+							refresh: async () => {
+								const refreshed = await codingPluginsManager.refresh();
+								codingPlugins = refreshed;
+								await reportPluginDiagnostics(refreshed.diagnostics);
+							},
+							mcpDefinitions: async ({
+								settings: pluginSettings,
+								reservedServerIds,
+							}: Parameters<ProjectPluginSource["mcpDefinitions"]>[0]) => {
+								const trustedSources = codingPlugins.mcpSources.filter(
+									(source) =>
+										source.servers.length > 0 &&
+										(!source.requiresWorkspaceTrust ||
+											(pluginSettings.workspaceMcpTrust ?? []).some(
+												(record) =>
+													record.workspace === workspace.root &&
+													record.path === source.path &&
+													record.sha256 === source.sha256,
+											)),
+								);
+								const preparedSources: typeof trustedSources = [];
+								for (const source of trustedSources) {
+									try {
+										if (source.servers.some(({ type }) => type === "stdio")) {
+											await options.fileSystem.makeDirectory(source.plugin.dataDirectory, {
+												recursive: true,
+												mode: 0o700,
+											});
+											await options.fileSystem.setMode(source.plugin.dataDirectory, 0o700);
+										}
+									} catch (error) {
+										await maintenanceDiagnostics({
+											code: "plugins.plugin-data-unavailable",
+											message: `Could not prepare Plugin data for ${source.plugin.snapshot.manifest.name}: ${error instanceof Error ? error.message : String(error)}`,
+										});
+									}
+									preparedSources.push(source);
+								}
+								const materialized = await materializeCodingPluginMcpDefinitions({
+									sources: preparedSources,
+									baseEnvironment: options.runtime.environment,
+									platform: options.runtime.platform,
+									reservedServerIds,
+								});
+								await reportPluginDiagnostics(materialized.diagnostics);
+								return materialized.definitions;
+							},
+						});
 						const projectSkills = await loadProjectSkills({
 							workspace: workspace.root,
 							homeDirectory: options.runtime.homeDirectory,
 							fileSystem: options.fileSystem,
+							plugins: pluginSource,
 						});
 						let mcpConfiguration = await inspectMcpConfiguration({
 							workspace: workspace.root,
@@ -388,6 +468,50 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								);
 							}
 						}
+						for (const source of codingPlugins.mcpSources.filter(
+							(source) => source.requiresWorkspaceTrust && source.servers.length > 0,
+						)) {
+							const alreadyTrusted = (settings.workspaceMcpTrust ?? []).some(
+								(record) =>
+									record.workspace === workspace.root &&
+									record.path === source.path &&
+									record.sha256 === source.sha256,
+							);
+							if (alreadyTrusted) continue;
+							const trustedInteractively =
+								!parsed.trustProjectMcp && interactiveRuntime
+									? await confirmFromTerminal(interactiveRuntime, workspacePluginMcpReviewText(source))
+									: false;
+							const mcpTrust = mcpTrustDecision({
+								workspace: workspace.root,
+								snapshot: {
+									path: source.path,
+									sha256: source.sha256,
+									trust: "untrusted",
+									serverCount: source.servers.length,
+									servers: [],
+								},
+								settings,
+								authorized: parsed.trustProjectMcp || trustedInteractively,
+							});
+							if (mcpTrust.updatedSettings && mcpTrust.trustRecord) {
+								settings = mcpTrust.updatedSettings;
+								await options.settings.save(settings);
+								await session.record({ type: "mcp_trust_changed", trust: mcpTrust.trustRecord });
+							} else if (!mcpTrust.trusted && !interactiveRuntime) {
+								await options.io.stderr.write(
+									`coda: Workspace Agent Plugin ${source.plugin.snapshot.manifest.name} MCP configuration ${source.sha256} is untrusted; its Servers were omitted\n`,
+								);
+							}
+						}
+						const pluginMcpDefinitions = await pluginSource.mcpDefinitions({
+							settings,
+							reservedServerIds: mcpConfiguration.definitions.map(({ id }) => id),
+						});
+						mcpConfiguration = Object.freeze({
+							...mcpConfiguration,
+							definitions: Object.freeze([...mcpConfiguration.definitions, ...pluginMcpDefinitions]),
+						});
 						let hookConfiguration = await inspectHookConfiguration({
 							workspace: workspace.root,
 							homeDirectory: options.runtime.homeDirectory,

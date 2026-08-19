@@ -451,7 +451,7 @@ Model:
 Workspace:
       --workspace <path>         Select the Workspace root
       --trust-project            Trust the current root AGENTS.md hash
-      --trust-project-mcp        Trust the exact current Workspace MCP configuration
+      --trust-project-mcp        Trust exact current Workspace MCP configurations
       --trust-hooks              Trust all exact Hook handler hashes after review
       --sandbox, -s [mode]       Process Confinement: read-only|workspace-write|danger-full-access
       --no-sandbox               Alias for --sandbox danger-full-access

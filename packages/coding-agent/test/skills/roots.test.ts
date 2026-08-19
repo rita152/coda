@@ -23,8 +23,20 @@ describe("collectSkillRoots", () => {
 			join(home, ".agents", "skills"),
 		]);
 		expect(roots.map(({ origin }) => origin)).toEqual([
-			{ scope: "workspace", root: join(workspace, ".agents", "skills"), priority: 0 },
-			{ scope: "user", root: join(home, ".agents", "skills"), priority: 1 },
+			{
+				scope: "workspace",
+				root: join(workspace, ".agents", "skills"),
+				priority: 0,
+				sourceLabel: "./.agents/skills",
+				kind: "direct",
+			},
+			{
+				scope: "user",
+				root: join(home, ".agents", "skills"),
+				priority: 2,
+				sourceLabel: "~/.agents/skills",
+				kind: "direct",
+			},
 		]);
 		expect(roots[0]!.symlinks).toEqual({ mode: "follow", containmentRoot: workspace });
 		expect(roots[1]!.symlinks).toEqual({ mode: "follow", allowOutsideRoot: true });

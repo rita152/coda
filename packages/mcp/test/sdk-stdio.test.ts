@@ -1,8 +1,16 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createMcpHost, createSdkMcpConnector } from "../src/index.ts";
+import { materializeStdioEnvironment } from "../src/sdk-connector.ts";
 
 describe("official SDK stdio adapter", () => {
+	it("keeps one admitted Path spelling under Windows environment semantics", () => {
+		const environment = materializeStdioEnvironment({ Path: "C:\\tools" }, "win32");
+
+		expect(environment.Path).toBe("C:\\tools");
+		expect(Object.keys(environment).filter((name) => name.toLowerCase() === "path")).toEqual(["Path"]);
+	});
+
 	it("pins MCP 2026-07-28, calls a Tool, and closes the child", async () => {
 		const previousAmbient = process.env.CODA_MCP_AMBIENT_SECRET;
 		process.env.CODA_MCP_AMBIENT_SECRET = "must-not-leak";

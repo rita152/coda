@@ -12,6 +12,37 @@ afterEach(async () => {
 });
 
 describe("FileSettingsStore", () => {
+	it("round-trips multiple Workspace MCP trust sources for one workspace by canonical path", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-mcp-trust-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "mcp-trust-settings" },
+		});
+		const records = [
+			{
+				workspace: "/workspace",
+				path: "/workspace/.agents/plugins/zeta/mcp.json",
+				sha256: "b".repeat(64),
+			},
+			{
+				workspace: "/workspace",
+				path: "/workspace/.coda/mcp.json",
+				sha256: "a".repeat(64),
+			},
+		];
+
+		await store.save({ workspaceMcpTrust: records });
+
+		await expect(store.load()).resolves.toEqual({ workspaceMcpTrust: records });
+		await expect(
+			store.save({
+				workspaceMcpTrust: [records[0]!, { ...records[0]!, sha256: "c".repeat(64) }],
+			}),
+		).rejects.toThrow("duplicate Workspace MCP Trust");
+	});
+
 	it("atomically stores a versioned non-secret settings file with private mode bits", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-settings-"));
 		temporaryDirectories.push(homeDirectory);

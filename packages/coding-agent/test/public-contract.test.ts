@@ -31,6 +31,7 @@ describe("@coda/coding-agent package contract", () => {
 			"@coda/ai": "0.1.0",
 			"@coda/mcp": "0.1.0",
 			"@coda/permission": "0.1.0",
+			"@coda/plugins": "0.1.0",
 			"@coda/runtime": "0.1.0",
 			"@coda/sandbox": "0.1.0",
 			"@coda/skills": "0.1.0",

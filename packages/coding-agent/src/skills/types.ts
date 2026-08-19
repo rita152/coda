@@ -14,6 +14,10 @@ export interface CodingSkillOrigin {
 	readonly scope: CodingSkillScope;
 	readonly root: string;
 	readonly priority: number;
+	readonly sourceLabel?: string;
+	readonly kind?: "direct" | "plugin";
+	readonly pluginName?: string;
+	readonly pluginRoot?: string;
 }
 
 export interface ResolvedCodingSkill {

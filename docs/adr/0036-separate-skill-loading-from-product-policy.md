@@ -8,7 +8,8 @@ ADR-0051 supersedes this decision's Workspace Skills Trust paragraph and makes
 Skill safety user-controlled. ADR-0043 moves Run-scoped Skill contribution
 acquisition, lifetime, and final prompt assembly into `@coda/runtime`; the leaf
 loader boundary, roots, precedence, and exact-revision activation remain
-accepted.
+accepted. ADR-0062 supersedes only the exact-root exclusion for Skills inside a
+validated Agent Plugin's fixed `skills/` location.
 
 Coda implements Agent Skills format handling, bounded local discovery, canonical identity, strict validation, and exact-revision activation in a leaf `@coda/skills` package. `@coda/coding-agent` owns roots, precedence, discovery management, the Skill capability source, watchers, and UI; `@coda/runtime` acquires that source and retains its exact-revision Tool and prompt contributions in the Run Capability Lease. This boundary was chosen over both a fully stage-pluggable source pipeline and a host-owned local inventory because it keeps the common runtime interface deep without turning Coda product behavior or speculative remote distribution into the loader's public contract.
 

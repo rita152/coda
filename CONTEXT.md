@@ -301,6 +301,14 @@ _Avoid_: current directory, repository
 The known or unknown decision to load a specific version of Workspace instructions into model Context; it never changes how Tools execute.
 _Avoid_: MCP Server Trust, Tool Invocation
 
+**Agent Plugin**:
+A portable package rooted at `plugin.json` that groups optional Skills and MCP Server declarations without granting either execution authority.
+_Avoid_: generic plugin container, client extension, Skill
+
+**Plugin Snapshot**:
+The immutable, diagnostic-bearing result of loading one Agent Plugin package before Coding Agent settings, trust, and Run admission are applied.
+_Avoid_: Run Capability Lease, live plugin, capability source
+
 **Skill**:
 A portable instruction bundle rooted at an Agent Skills-compatible `SKILL.md`, with optional files that remain inert until explicitly read or invoked through ordinary Tools.
 _Avoid_: command, plugin, Tool

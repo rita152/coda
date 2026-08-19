@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 // boundary-exception: the runtime regression suite consumes the repository-owned pure boundary rules.
 import {
+	CODING_AGENT_VALUE_IMPORTS,
 	lintSource,
 	PACKAGE_DEPENDENCY_MATRIX,
 	RUNTIME_DENIED_SYMBOLS,
@@ -53,15 +54,50 @@ describe("repository boundary rules", () => {
 		expect(PACKAGE_DEPENDENCY_MATRIX).toEqual({
 			ai: [],
 			agent: ["ai"],
-			"coding-agent": ["agent", "ai", "mcp", "permission", "runtime", "sandbox", "skills", "tui"],
+			"coding-agent": ["agent", "ai", "mcp", "permission", "plugins", "runtime", "sandbox", "skills", "tui"],
 			evals: ["agent", "ai", "runtime"],
 			mcp: [],
 			permission: [],
+			plugins: ["mcp", "skills"],
 			runtime: ["agent", "ai"],
 			sandbox: [],
 			skills: [],
 			tui: [],
 		});
+	});
+
+	it("keeps Agent Plugin loading above Runtime and behind one application adapter", () => {
+		const codaPackage = (name: string) => `@coda/${name}`;
+		expect(CODING_AGENT_VALUE_IMPORTS.plugins).toEqual(["host"]);
+		expect(
+			Object.entries(CODING_AGENT_VALUE_IMPORTS)
+				.filter(([, dependencies]) => dependencies.includes("plugins"))
+				.map(([module]) => module),
+		).toEqual(["app"]);
+
+		const portableLoader = lintSource({
+			source: `import type {} from "${codaPackage("mcp")}";\nimport type {} from "${codaPackage("skills")}";`,
+			file: "/repo/packages/plugins/src/loader.ts",
+			packageName: "plugins",
+			packageRoot: "/repo/packages/plugins",
+		});
+		expect(portableLoader).toEqual([]);
+
+		const runtime = lintSource({
+			source: `import "${codaPackage("plugins")}";`,
+			file: "/repo/packages/runtime/src/planted.ts",
+			packageName: "runtime",
+			packageRoot: "/repo/packages/runtime",
+		});
+		expect(runtime.map(({ rule }) => rule)).toEqual(["package-direction"]);
+
+		const pluginPolicyLeak = lintSource({
+			source: 'import "../settings/types.ts";',
+			file: "/repo/packages/coding-agent/src/plugins/adapter.ts",
+			packageName: "coding-agent",
+			packageRoot: "/repo/packages/coding-agent",
+		});
+		expect(pluginPolicyLeak.map(({ rule }) => rule)).toEqual(["coding-agent-value-direction"]);
 	});
 
 	it("keeps runtime dependencies exactly agent and ai", async () => {

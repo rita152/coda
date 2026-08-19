@@ -1,6 +1,6 @@
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { SkillCandidate, SkillFileSystem, SkillId } from "@coda/skills";
-import type { CodingSkillsSnapshot, ResolvedCodingSkill } from "./types.ts";
+import type { CodingSkillOrigin, CodingSkillsSnapshot, ResolvedCodingSkill } from "./types.ts";
 
 const OPENAI_POLICY = /^[ \t]*allow_implicit_invocation:[ \t]*(true|false)[ \t]*(?:#.*)?$/mu;
 
@@ -29,16 +29,42 @@ function errorCode(error: unknown): string | undefined {
 		: undefined;
 }
 
+function isContained(root: string, target: string): boolean {
+	const fromRoot = relative(root, target);
+	return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
+}
+
+async function readableSidecarPath(
+	fileSystem: SkillFileSystem,
+	candidate: SkillCandidate<CodingSkillOrigin>,
+	path: string,
+): Promise<string | undefined> {
+	const pluginOrigin = candidate.provenance.map(({ origin }) => origin).find(({ kind }) => kind === "plugin");
+	if (!pluginOrigin) return path;
+	if (!pluginOrigin.pluginRoot) return undefined;
+	await fileSystem.lstat(path);
+	const [currentPluginRoot, canonicalPath] = await Promise.all([
+		fileSystem.realpath(pluginOrigin.root),
+		fileSystem.realpath(path),
+	]);
+	if (relative(pluginOrigin.pluginRoot, currentPluginRoot) !== "") return undefined;
+	if (!isContained(pluginOrigin.pluginRoot, canonicalPath)) return undefined;
+	if ((await fileSystem.stat(canonicalPath)).kind !== "file") return undefined;
+	return canonicalPath;
+}
+
 /** Reads Codex `agents/openai.yaml` policy without failing Skill discovery. */
 export async function readSidecarImplicitInvocation(
 	fileSystem: SkillFileSystem,
-	candidates: readonly SkillCandidate[],
+	candidates: readonly SkillCandidate<CodingSkillOrigin>[],
 ): Promise<ReadonlyMap<SkillId, boolean>> {
 	const entries = await Promise.all(
 		candidates.map(async (candidate) => {
 			const path = join(candidate.directory, "agents", "openai.yaml");
 			try {
-				const text = new TextDecoder().decode(await fileSystem.readFile(path));
+				const readablePath = await readableSidecarPath(fileSystem, candidate, path);
+				if (!readablePath) return undefined;
+				const text = new TextDecoder().decode(await fileSystem.readFile(readablePath));
 				const allow = parseAllowImplicitInvocation(text);
 				return allow === undefined ? undefined : ([candidate.id, allow] as const);
 			} catch (error) {

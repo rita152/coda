@@ -48,7 +48,7 @@ class ImmutableMap<K, V> implements ReadonlyMap<K, V> {
 }
 
 function originLabel(origin: CodingSkillOrigin): string {
-	return origin.scope === "user" ? "~/.agents/skills" : "./.agents/skills";
+	return origin.sourceLabel ?? (origin.scope === "user" ? "~/.agents/skills" : "./.agents/skills");
 }
 
 function qualifiedName(

@@ -37,6 +37,14 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
 	return Object.keys(value).every((key) => allowedKeys.has(key));
 }
 
+function compareText(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function workspaceMcpTrustKey(value: { readonly workspace: string; readonly path: string }): string {
+	return `${value.workspace}\0${value.path}`;
+}
+
 function validNetworkDomainPattern(value: string, allowDenyAll: boolean): boolean {
 	let host = value.trim().toLowerCase();
 	if (!host) return false;
@@ -203,8 +211,10 @@ function validateSettings(value: unknown): UserSettings {
 			}
 			return { workspace: entry.workspace, path: entry.path, sha256: entry.sha256 };
 		});
-		workspaceMcpTrust = [...workspaceMcpTrust].sort((left, right) => left.workspace.localeCompare(right.workspace));
-		if (new Set(workspaceMcpTrust.map(({ workspace }) => workspace)).size !== workspaceMcpTrust.length) {
+		workspaceMcpTrust = [...workspaceMcpTrust].sort(
+			(left, right) => compareText(left.workspace, right.workspace) || compareText(left.path, right.path),
+		);
+		if (new Set(workspaceMcpTrust.map(workspaceMcpTrustKey)).size !== workspaceMcpTrust.length) {
 			throw new Error("Coda settings contain duplicate Workspace MCP Trust records");
 		}
 	}

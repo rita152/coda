@@ -18,7 +18,7 @@ describe("Work Graph dependency boundaries", () => {
 		for (const file of await sourceFiles(root)) {
 			const source = await readFile(file, "utf8");
 			expect(source, file).not.toMatch(
-				/@coda\/(?:tui|coding-agent|mcp|skills)|packages\/coding-agent|coding-agent\/src/u,
+				/@coda\/(?:tui|coding-agent|mcp|plugins|skills)|packages\/coding-agent|coding-agent\/src/u,
 			);
 		}
 		const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -27,6 +27,7 @@ describe("Work Graph dependency boundaries", () => {
 		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/tui");
 		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/coding-agent");
 		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/mcp");
+		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/plugins");
 		expect(Object.keys(manifest.dependencies ?? {})).not.toContain("@coda/skills");
 	});
 

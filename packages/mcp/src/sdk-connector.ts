@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import {
 	Client,
 	StreamableHTTPClientTransport,
@@ -71,6 +72,112 @@ function versionNegotiation(definition: McpServerDefinition): VersionNegotiation
 	}
 }
 
+const HTTP_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_HTTP_REDIRECTS = 10;
+
+function compareOrigin(left: URL, right: URL): boolean {
+	return left.protocol === right.protocol && left.hostname === right.hostname && left.port === right.port;
+}
+
+function configuredHttpHeaders(definition: McpServerDefinition): Readonly<Record<string, string>> | undefined {
+	if (definition.transport.kind !== "http" || !definition.transport.headers) return undefined;
+	const retained = Object.entries(definition.transport.headers).filter(([name]) => {
+		const normalized = name.toLowerCase();
+		if (
+			["accept", "content-type", "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name"].includes(
+				normalized,
+			) ||
+			normalized.startsWith("mcp-param-")
+		) {
+			return false;
+		}
+		return (
+			normalized !== "authorization" || definition.transport.kind !== "http" || !definition.transport.bearerToken
+		);
+	});
+	return retained.length > 0 ? Object.freeze(Object.fromEntries(retained)) : undefined;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+	const host = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
+	if (host.toLowerCase() === "localhost") return true;
+	const version = isIP(host);
+	if (version === 4) return host.split(".")[0] === "127";
+	return version === 6 && host.toLowerCase() === "::1";
+}
+
+function validateRedirectEndpoint(previous: URL, redirected: URL): void {
+	if (redirected.protocol !== "http:" && redirected.protocol !== "https:") {
+		throw new Error(`MCP HTTP redirect must use http or https: ${redirected.href}`);
+	}
+	if (redirected.username || redirected.password || redirected.hash) {
+		throw new Error(`MCP HTTP redirect must not contain credentials or a fragment: ${redirected.href}`);
+	}
+	if (previous.protocol === "https:" && redirected.protocol === "http:") {
+		throw new Error(`MCP HTTP redirect must not downgrade from HTTPS to HTTP: ${redirected.href}`);
+	}
+	if (redirected.protocol === "http:" && !isLoopbackHost(redirected.hostname)) {
+		throw new Error(`MCP HTTP redirect must use HTTPS for a non-loopback endpoint: ${redirected.href}`);
+	}
+}
+
+function redirectedMethod(status: number, method: string | undefined): string | undefined {
+	const normalized = method?.toUpperCase();
+	if (status === 303 && normalized !== "HEAD") return "GET";
+	if ((status === 301 || status === 302) && normalized === "POST") return "GET";
+	return method;
+}
+
+/** @internal Follows bounded redirects while preserving configured-header origin scope. */
+export function redirectSafeFetch(
+	fetch_: typeof globalThis.fetch,
+	configuredHeaderNames: readonly string[],
+): typeof globalThis.fetch {
+	const configured = new Set(configuredHeaderNames.map((name) => name.toLowerCase()));
+	return async (input, init) => {
+		let url = new URL(input instanceof Request ? input.url : input.toString());
+		let request: RequestInit = { ...init, redirect: "manual" };
+		for (let redirects = 0; ; redirects++) {
+			const response = await fetch_(url, request);
+			if (!HTTP_REDIRECT_STATUSES.has(response.status)) return response;
+			const location = response.headers.get("location");
+			if (!location) return response;
+			if (redirects >= MAX_HTTP_REDIRECTS) throw new Error("MCP HTTP redirect limit exceeded");
+			const redirected = new URL(location, url);
+			validateRedirectEndpoint(url, redirected);
+			const headers = new Headers(request.headers);
+			if (!compareOrigin(url, redirected)) {
+				for (const name of configured) headers.delete(name);
+				for (const name of [
+					"authorization",
+					"proxy-authorization",
+					"cookie",
+					"cookie2",
+					"mcp-session-id",
+					"last-event-id",
+				]) {
+					headers.delete(name);
+				}
+			}
+			const method = redirectedMethod(response.status, request.method);
+			const dropsBody = method === "GET" && request.method?.toUpperCase() !== "GET";
+			if (dropsBody) {
+				headers.delete("content-length");
+				headers.delete("content-type");
+			}
+			await response.body?.cancel().catch(() => undefined);
+			url = redirected;
+			request = {
+				...request,
+				...(method ? { method } : {}),
+				headers,
+				...(dropsBody ? { body: undefined } : {}),
+				redirect: "manual",
+			};
+		}
+	};
+}
+
 function httpTransport(
 	definition: McpServerDefinition,
 	fetch: typeof globalThis.fetch | undefined,
@@ -83,11 +190,33 @@ function httpTransport(
 	if (url.username || url.password || url.hash) {
 		throw new Error(`MCP HTTP URL must not contain credentials or a fragment: ${definition.transport.url}`);
 	}
+	const headers = configuredHttpHeaders(definition);
+	const safeFetch = redirectSafeFetch(fetch ?? globalThis.fetch, Object.keys(headers ?? {}));
 	return new StreamableHTTPClientTransport(url, {
-		...(fetch ? { fetch } : {}),
-		...(definition.transport.headers ? { requestInit: { headers: { ...definition.transport.headers } } } : {}),
+		fetch: safeFetch,
+		...(headers ? { requestInit: { headers: { ...headers } } } : {}),
 		...(definition.transport.bearerToken ? { authProvider: { token: definition.transport.bearerToken } } : {}),
 	});
+}
+
+/** @internal Applies child-platform environment-name equivalence before stdio launch. */
+export function materializeStdioEnvironment(
+	configured: Readonly<Record<string, string>> | undefined,
+	platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+	const environment = Object.create(null) as Record<string, string | undefined>;
+	const set = (name: string, value: string | undefined): void => {
+		if (platform === "win32") {
+			const normalized = name.toLowerCase();
+			for (const existing of Object.keys(environment)) {
+				if (existing.toLowerCase() === normalized) delete environment[existing];
+			}
+		}
+		environment[name] = value;
+	};
+	for (const name of DEFAULT_INHERITED_ENV_VARS) set(name, undefined);
+	for (const [name, value] of Object.entries(configured ?? {})) set(name, value);
+	return environment as Record<string, string>;
 }
 
 function stdioTransport(
@@ -99,10 +228,7 @@ function stdioTransport(
 	if (!definition.transport.command) throw new Error(`MCP stdio Server "${definition.id}" requires a command`);
 	// The SDK merges a small ambient allowlist even when `env` is supplied. Explicit
 	// undefined overrides make Node omit those keys unless the Host admitted them.
-	const environment = Object.fromEntries(
-		DEFAULT_INHERITED_ENV_VARS.map((name) => [name, undefined]),
-	) as unknown as Record<string, string>;
-	Object.assign(environment, definition.transport.environment ?? {});
+	const environment = materializeStdioEnvironment(definition.transport.environment);
 	const transport = new StdioClientTransport({
 		command: definition.transport.command,
 		...(definition.transport.args ? { args: [...definition.transport.args] } : {}),

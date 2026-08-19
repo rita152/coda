@@ -2,8 +2,8 @@
 
 Coda's private terminal Coding Agent application. It composes `@coda/ai`,
 `@coda/agent`, `@coda/runtime`, `@coda/tui`, `@coda/skills`, `@coda/mcp`,
-`@coda/permission`, and `@coda/sandbox`. The package owns CLI and terminal
-policy, host Adapters, durable Session storage, Model configuration,
+`@coda/plugins`, `@coda/permission`, and `@coda/sandbox`. The package owns CLI
+and terminal policy, host Adapters, durable Session storage, Model configuration,
 Credentials, and application presentation; the headless Work Graph and Worker
 Runtime policies live in `@coda/runtime`.
 
@@ -206,10 +206,13 @@ Useful maintenance commands are `coda sessions` and `coda cleanup`. Run
 `coda skills validate <path>` for strict Agent Skills validation without a Model
 or Session.
 
-Local Agent Skills are discovered only from `<Workspace>/.agents/skills` and
-`~/.agents/skills`; Coda does not scan client-specific or ancestor directories.
-The project root has deterministic precedence over the global root. Global Skills
-are user-managed, and typing `$` shows project and global Skills for explicit
+Local Agent Skills are discovered from `<Workspace>/.agents/skills` and
+`~/.agents/skills`. A validated Agent Plugin may also contribute immediate-child
+Skills from `<Workspace>/.agents/plugins/<name>/skills/` or
+`~/.agents/plugins/<name>/skills/`; Coda does not scan ancestor directories or
+unrelated client-specific roots. Precedence is direct Workspace Skill,
+Workspace Plugin Skill, direct user Skill, then user Plugin Skill. Global Skills
+are user-managed, and typing `$` shows every admitted Skill for explicit
 selection. A plain `$name` in print or interactive text injects that Skill for
 the current Run. Coda does not make a separate Skill safety decision. Explicit
 Composer Skill references are user-selected context; model-selected Skills use
@@ -300,7 +303,14 @@ Coda can act as an MCP Host and expose external Server Tools to the Coding
 Agent. User-managed Server Definitions live in `~/.coda/settings.json` under
 `mcpServers`. Workspace Definitions live in `<Workspace>/.coda/mcp.json` and
 remain inert until the exact file hash is reviewed interactively or admitted
-with `--trust-project-mcp`. A changed Workspace file requires review again.
+with `--trust-project-mcp`. Agent Plugins are discovered by installation slot
+from `<Workspace>/.agents/plugins/<name>/` and `~/.agents/plugins/<name>/`, with
+the valid Workspace slot winning over the same user slot. Plugin Skills enter
+the same Skill Inventory. User Plugin MCP Servers are admitted like user MCP
+settings; each Workspace Plugin `mcp.json` has its own exact-revision trust
+record and remains inert until reviewed or admitted with the same flag. Stdio
+Plugin state is stored persistently under `~/.coda/plugin-data/` and is created
+only after admission. A changed Workspace file requires review again.
 
 ```json
 {
@@ -348,12 +358,16 @@ A Workspace file uses the same Server objects:
 }
 ```
 
-HTTP defaults to modern discovery with legacy fallback; stdio defaults to an
-explicit `2026-07-28` pin. Set `protocol` to `auto` or `legacy` only when the
-Server requires it. A stdio child receives only `environment` plus variables
+Native HTTP Definitions default to modern discovery with legacy fallback;
+native stdio Definitions default to an explicit `2026-07-28` pin. Set
+`protocol` to `auto` or `legacy` only when the Server requires it. Agent Plugin
+MCP declarations have no wire-version field, so Coda automatically negotiates
+a supported version while preserving their declared transport. A stdio child receives only `environment` plus variables
 named in `environmentFrom`; ambient credentials are not inherited. HTTP bearer
 tokens are read from the named Coda process environment variable and are never
-stored in the Definition.
+persisted or stored in the Definition. Agent Plugin `streamable-http` Servers
+reuse this transport; legacy Agent Plugin `sse` (HTTP+SSE) entries are diagnosed
+and skipped.
 
 Every admitted Tool is namespaced as `mcp__<server>__<tool>`. A Tool enters a
 Run only when the user names it with `$` — `$search`, `$docs-search`,
@@ -389,6 +403,7 @@ This status block is generated from executable runtime contracts. See the
 - **Bounded Agent Runs** (@coda/agent) — Immutable per-Run budgets cap Turns, Model Attempts, Tool invocations, elapsed time, token and USD usage, and repeated equivalent Tool batches with explicit exhaustion events.
 - **Agent runtime** (@coda/agent) — In-memory Runs and Turns, immutable events, Tool execution, cancellation, Steering and Follow-up queues, opt-in whole-Turn retry, and a public settleToolInvocation port for isolated lookup, validation, and execution.
 - **Model access** (@coda/ai) — OpenCode Go and custom API-key Providers, streaming text, Thinking, Tool calls, structured Diagnostics, cancellation, and explicit model-catalog refresh. Custom Provider protocols: `openai.chatcompletions`, `openai.responses`, and `anthropic.messages`.
+- **Agent Plugins 1.0.0 client** (@coda/plugins) — Portable Agent Plugin loading validates root manifests, fixed Skill and MCP components, containment, diagnostics, immutable snapshots, and stdio placeholders; the Coding Agent applies Workspace precedence and exact MCP trust before mapping components into the existing Run capability seams.
 - **Built-in Tools** (@coda/coding-agent) — Workspace-relative and absolute-path reading and search; multi-Provider Web search with timeout, fallback, deduplication, and bounded caching; clean URL fetching for HTML, structured text, Feeds, images, and common documents; atomic single-file create-or-replace and exact-text edit; direct host Shell execution; and recoverable continuation of omitted Tool output. Built-ins: `read_session_history`, `read`, `read_tool_output`, `web_search`, `fetch`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, and `process`.
 - **Command Permission** (@coda/permission) — A leaf Approval Policy (untrusted, on-request, or never) decides allow, deny, or ask for one Tool Invocation using Codex's known-safe and dangerous-command rules. The Coding Agent adapter hangs on Lifecycle Hooks, resolves ask before the runtime, and can remember Session, Workspace, or user decisions. Interactive `/permissions` applies Codex approval presets for the current Session. Print mode defaults to never and denies unresolved asks.
 - **Evidence-backed print completion** (@coda/coding-agent) — Print and JSON Runs emit a versioned completion disposition that keeps lifecycle, evidence completeness, local verification, and hidden-verifier scope separate, with one bounded repair Steering by default.

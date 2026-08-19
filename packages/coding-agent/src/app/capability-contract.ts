@@ -362,6 +362,29 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		],
 	}),
 	capability({
+		id: "coding-agent.agent-plugins",
+		package: "@coda/plugins",
+		status: "runtime-supported",
+		title: "Agent Plugins 1.0.0 client",
+		summary:
+			"Portable Agent Plugin loading validates root manifests, fixed Skill and MCP components, containment, diagnostics, immutable snapshots, and stdio placeholders; the Coding Agent applies Workspace precedence and exact MCP trust before mapping components into the existing Run capability seams.",
+		sources: [
+			"packages/plugins/src/loader.ts",
+			"packages/plugins/src/mcp-config.ts",
+			"packages/plugins/src/materialize.ts",
+			"packages/coding-agent/src/plugins/inventory.ts",
+			"packages/coding-agent/src/application.ts",
+		],
+		tests: [
+			"packages/plugins/test/loader.test.ts",
+			"packages/plugins/test/mcp-config.test.ts",
+			"packages/plugins/test/materialize.test.ts",
+			"packages/coding-agent/test/plugins/inventory.test.ts",
+			"packages/coding-agent/test/plugins/mcp.test.ts",
+			"packages/coding-agent/test/mcp/application.test.ts",
+		],
+	}),
+	capability({
 		id: "coding-agent.credential-storage",
 		package: "@coda/coding-agent",
 		status: "runtime-supported",

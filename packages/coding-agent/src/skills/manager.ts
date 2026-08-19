@@ -1,5 +1,6 @@
 import type { SkillFileSystem, SkillRoot, Skills } from "@coda/skills";
-import { createSkills } from "@coda/skills";
+import { createSkills, DEFAULT_SKILL_LIMITS } from "@coda/skills";
+import { aggregateSkillsSnapshots } from "./aggregate.ts";
 import { readSidecarImplicitInvocation } from "./invocation.ts";
 import { createCodingSkillsSnapshot } from "./snapshot.ts";
 import type { CodingSkillOrigin, CodingSkillsSnapshot } from "./types.ts";
@@ -8,12 +9,17 @@ export interface CodingSkillsManagerOptions {
 	readonly fileSystem: SkillFileSystem;
 	readonly roots: readonly SkillRoot<CodingSkillOrigin>[];
 	readonly limits?: Parameters<typeof createSkills>[0]["limits"];
+	readonly supplementalSnapshots?: () =>
+		| readonly import("@coda/skills").SkillsSnapshot<CodingSkillOrigin>[]
+		| Promise<readonly import("@coda/skills").SkillsSnapshot<CodingSkillOrigin>[]>;
 }
 
 export class CodingSkillsManager {
 	readonly #runtime: Skills<CodingSkillOrigin>;
 	readonly #fileSystem: SkillFileSystem;
 	readonly #roots: readonly SkillRoot<CodingSkillOrigin>[];
+	readonly #supplementalSnapshots?: CodingSkillsManagerOptions["supplementalSnapshots"];
+	readonly #maxSkills: number;
 	#current?: CodingSkillsSnapshot;
 	#dirty = true;
 	#dirtyGeneration = 0;
@@ -27,6 +33,8 @@ export class CodingSkillsManager {
 			...(options.limits ? { limits: options.limits } : {}),
 		});
 		this.#roots = Object.freeze([...options.roots]);
+		this.#supplementalSnapshots = options.supplementalSnapshots;
+		this.#maxSkills = options.limits?.maxSkills ?? DEFAULT_SKILL_LIMITS.maxSkills;
 	}
 
 	get roots(): readonly SkillRoot<CodingSkillOrigin>[] {
@@ -56,13 +64,22 @@ export class CodingSkillsManager {
 		const generation = this.#dirtyGeneration;
 		let operation = this.#refreshes.get(generation);
 		if (!operation) {
-			operation = this.#runtime
-				.snapshot({ roots: this.#roots, profile: "compatible" })
-				.then(async (loader) => {
+			operation = Promise.all([
+				this.#runtime.snapshot({ roots: this.#roots, profile: "compatible" }),
+				Promise.resolve(this.#supplementalSnapshots?.() ?? []),
+			])
+				.then(async ([primary, supplemental]) => {
+					const loader = aggregateSkillsSnapshots([primary, ...supplemental], { maxSkills: this.#maxSkills });
 					const implicitInvocationById = await readSidecarImplicitInvocation(this.#fileSystem, loader.candidates);
+					const roots = [
+						...this.#roots,
+						...loader.candidates.flatMap(({ provenance }) =>
+							provenance.map(({ root, origin }) => Object.freeze({ path: root, origin })),
+						),
+					];
 					const snapshot = createCodingSkillsSnapshot({
 						loader,
-						roots: this.#roots,
+						roots,
 						implicitInvocationById,
 					});
 					if (generation >= this.#publishedGeneration) {

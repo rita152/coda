@@ -33,6 +33,7 @@ human-readable projection is in the
 | `@coda/tui` | Application-neutral terminal primitives |
 | `@coda/skills` | Agent Skills parsing, discovery, and activation |
 | `@coda/mcp` | MCP client protocol and connection runtime |
+| `@coda/plugins` | Agent Plugins 1.0.0 package validation and portable component discovery |
 | `@coda/permission` | Command Permission policy for one Tool Invocation |
 | `@coda/sandbox` | Process Confinement for one Shell script |
 | `@coda/coding-agent` | Private CLI application and host composition |

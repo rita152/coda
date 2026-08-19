@@ -100,7 +100,7 @@ function skillRootLines(snapshot: CodingSkillsSnapshot): readonly string[] {
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const root of snapshot.roots) {
-		const label = root.origin.scope === "user" ? "~/.agents/skills" : "./.agents/skills";
+		const label = root.origin.sourceLabel ?? (root.origin.scope === "user" ? "~/.agents/skills" : "./.agents/skills");
 		if (seen.has(label)) continue;
 		seen.add(label);
 		lines.push(`- ${label} -> ${root.origin.root}`);

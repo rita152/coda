@@ -1,12 +1,14 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createSkills, type SkillsSnapshot } from "@coda/skills";
 import { afterEach, describe, expect, it } from "vitest";
 import { skillExtensionEntries } from "../../src/commands/skill-extensions.ts";
 import { createNodeFileSystem } from "../../src/host/node-file-system.ts";
 import { CodingSkillsManager } from "../../src/skills/manager.ts";
 import { collectSkillRoots } from "../../src/skills/roots.ts";
 import { createSkillsCapabilitySource } from "../../src/skills/run-capability.ts";
+import type { CodingSkillOrigin } from "../../src/skills/types.ts";
 
 const temporary: string[] = [];
 
@@ -33,6 +35,192 @@ async function fixture() {
 }
 
 describe("CodingSkills discovery and precedence", () => {
+	it("merges a plugin Skill snapshot into the same inventory and routes activation through its loader", async () => {
+		const value = await fixture();
+		const skillRoot = join(value.workspace, ".agents", "plugins", "review-tools", "skills", "review");
+		await writeSkill(
+			join(value.workspace, ".agents", "plugins", "review-tools", "skills"),
+			"review",
+			"review",
+			"Review from a plugin",
+		);
+		const pluginOrigin: CodingSkillOrigin = Object.freeze({
+			scope: "workspace",
+			root: skillRoot,
+			priority: 1,
+			sourceLabel: "./.agents/plugins/review-tools/skills/review",
+			kind: "plugin",
+			pluginName: "review-tools",
+		});
+		const pluginSnapshot = await createSkills<CodingSkillOrigin>({ fileSystem: value.fileSystem }).snapshot({
+			roots: [
+				{
+					path: skillRoot,
+					origin: pluginOrigin,
+					symlinks: {
+						mode: "follow",
+						containmentRoot: join(value.workspace, ".agents", "plugins", "review-tools"),
+					},
+				},
+			],
+			profile: "strict",
+		});
+		const manager = new CodingSkillsManager({
+			fileSystem: value.fileSystem,
+			roots: value.roots,
+			supplementalSnapshots: () => [pluginSnapshot],
+		});
+
+		const snapshot = await manager.refresh();
+
+		expect(snapshot.resolved).toHaveLength(1);
+		expect(snapshot.resolved[0]).toMatchObject({
+			sourceLabel: "./.agents/plugins/review-tools/skills/review",
+			origin: { kind: "plugin", pluginName: "review-tools" },
+		});
+		await expect(snapshot.activate(snapshot.resolved[0]!.candidate.id)).resolves.toMatchObject({
+			body: expect.stringContaining("Use review"),
+		});
+	});
+
+	it("does not follow a Plugin Skill sidecar outside the canonical Plugin root", async () => {
+		const value = await fixture();
+		const pluginRoot = join(value.workspace, ".agents", "plugins", "review-tools");
+		const skillRoot = join(pluginRoot, "skills", "review");
+		await writeSkill(join(pluginRoot, "skills"), "review", "review", "Review from a plugin");
+		await mkdir(join(skillRoot, "agents"), { recursive: true });
+		const outside = join(value.base, "outside-openai.yaml");
+		await writeFile(outside, "policy:\n  allow_implicit_invocation: false\n");
+		await symlink(outside, join(skillRoot, "agents", "openai.yaml"));
+		const pluginSnapshot = await createSkills<CodingSkillOrigin>({ fileSystem: value.fileSystem }).snapshot({
+			roots: [
+				{
+					path: skillRoot,
+					origin: {
+						scope: "workspace",
+						root: pluginRoot,
+						pluginRoot: await realpath(pluginRoot),
+						priority: 1,
+						sourceLabel: "./.agents/plugins/review-tools/skills/review",
+						kind: "plugin",
+						pluginName: "review-tools",
+					},
+					symlinks: { mode: "follow", containmentRoot: pluginRoot },
+				},
+			],
+			profile: "strict",
+		});
+		const manager = new CodingSkillsManager({
+			fileSystem: value.fileSystem,
+			roots: value.roots,
+			supplementalSnapshots: () => [pluginSnapshot],
+		});
+
+		const snapshot = await manager.refresh();
+
+		expect(snapshot.resolved[0]?.implicitInvocation).toBe(true);
+	});
+
+	it("orders direct and plugin collisions by workspace scope before user scope", async () => {
+		const value = await fixture();
+		await writeSkill(join(value.workspace, ".agents", "skills"), "shared", "shared", "Direct workspace");
+		await writeSkill(join(value.home, ".agents", "skills"), "shared", "shared", "Direct user");
+		const loadPlugin = async (scope: "workspace" | "user", slot: string, description: string, priority: number) => {
+			const parent = scope === "workspace" ? value.workspace : value.home;
+			const pluginRoot = join(parent, ".agents", "plugins", slot);
+			const skillRoot = join(pluginRoot, "skills", "shared");
+			await writeSkill(join(pluginRoot, "skills"), "shared", "shared", description);
+			return createSkills<CodingSkillOrigin>({ fileSystem: value.fileSystem }).snapshot({
+				roots: [
+					{
+						path: skillRoot,
+						origin: {
+							scope,
+							root: skillRoot,
+							priority,
+							sourceLabel: `${scope}:${slot}`,
+							kind: "plugin",
+							pluginName: slot,
+						},
+						symlinks: { mode: "follow", containmentRoot: pluginRoot },
+					},
+				],
+				profile: "strict",
+			});
+		};
+		const workspacePlugin = await loadPlugin("workspace", "workspace-tools", "Workspace plugin", 1);
+		const userPlugin = await loadPlugin("user", "user-tools", "User plugin", 3);
+		const manager = new CodingSkillsManager({
+			fileSystem: value.fileSystem,
+			roots: value.roots,
+			supplementalSnapshots: () => [workspacePlugin, userPlugin],
+		});
+
+		const shared = (await manager.refresh()).resolved.filter(({ candidate }) => candidate.metadata.name === "shared");
+
+		expect(shared.map(({ precedence }) => precedence)).toEqual([0, 1, 2, 3]);
+		expect(shared.map(({ candidate }) => candidate.metadata.description)).toEqual([
+			"Direct workspace",
+			"Workspace plugin",
+			"Direct user",
+			"User plugin",
+		]);
+	});
+
+	it("applies one maxSkills bound across direct and Plugin snapshots", async () => {
+		const value = await fixture();
+		await writeSkill(join(value.workspace, ".agents", "skills"), "direct", "direct", "Direct workspace");
+		const pluginSnapshots: SkillsSnapshot<CodingSkillOrigin>[] = [];
+		for (const [scope, slot, priority] of [
+			["workspace", "workspace-tools", 1],
+			["user", "user-tools", 3],
+		] as const) {
+			const parent = scope === "workspace" ? value.workspace : value.home;
+			const pluginRoot = join(parent, ".agents", "plugins", slot);
+			const skillRoot = join(pluginRoot, "skills", slot);
+			await writeSkill(join(pluginRoot, "skills"), slot, slot, `${scope} plugin`);
+			pluginSnapshots.push(
+				await createSkills<CodingSkillOrigin>({ fileSystem: value.fileSystem }).snapshot({
+					roots: [
+						{
+							path: skillRoot,
+							origin: {
+								scope,
+								root: pluginRoot,
+								pluginRoot: await realpath(pluginRoot),
+								priority,
+								sourceLabel: `${scope}:${slot}`,
+								kind: "plugin",
+								pluginName: slot,
+							},
+							symlinks: { mode: "follow", containmentRoot: pluginRoot },
+						},
+					],
+					profile: "strict",
+				}),
+			);
+		}
+		const manager = new CodingSkillsManager({
+			fileSystem: value.fileSystem,
+			roots: value.roots,
+			limits: { maxSkills: 2 },
+			supplementalSnapshots: () => pluginSnapshots,
+		});
+
+		const snapshot = await manager.refresh();
+
+		expect(snapshot.resolved.map(({ candidate }) => candidate.metadata.description)).toEqual([
+			"Direct workspace",
+			"workspace plugin",
+		]);
+		expect(snapshot.diagnostics).toContainEqual(
+			expect.objectContaining({ code: "skill-limit-exceeded", severity: "error" }),
+		);
+		await expect(snapshot.activate(snapshot.resolved[1]!.candidate.id)).resolves.toMatchObject({
+			body: expect.stringContaining("Use workspace-tools"),
+		});
+	});
+
 	it("loads workspace Skills without a trust record", async () => {
 		const value = await fixture();
 		await writeSkill(join(value.workspace, ".agents", "skills"), "review", "review", "Review changes");
