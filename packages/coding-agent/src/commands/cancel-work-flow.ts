@@ -24,8 +24,7 @@ export function createCancelWorkCommandFlow(options: CancelWorkCommandFlowOption
 							id: "graph",
 							label: "Cancel entire Work Graph",
 							description: NO_ROLLBACK,
-							onSelect: (navigation: CommandFlowNavigation) =>
-								finish(options.onCancelGraph(), navigation),
+							onSelect: (navigation: CommandFlowNavigation) => finish(options.onCancelGraph(), navigation),
 						}),
 					]
 				: []),

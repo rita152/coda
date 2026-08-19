@@ -15,6 +15,7 @@ describe("core commands", () => {
 			"hooks",
 			"permissions",
 			"session",
+			"cancel-work",
 			"new",
 			"follow-up",
 		]);

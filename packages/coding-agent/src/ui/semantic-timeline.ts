@@ -903,9 +903,7 @@ function projectDelegatedResult(result: WorkResult): TimelineDelegatedWorkResult
 		state: result.state,
 		publication: result.publication.state,
 		diagnostics: Object.freeze(
-			result.diagnostics.map((diagnostic) =>
-				Object.freeze({ code: diagnostic.code, message: diagnostic.message }),
-			),
+			result.diagnostics.map((diagnostic) => Object.freeze({ code: diagnostic.code, message: diagnostic.message })),
 		),
 	});
 }

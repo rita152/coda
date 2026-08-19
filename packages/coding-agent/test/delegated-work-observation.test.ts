@@ -229,9 +229,7 @@ async function openDelegatedParent(options: { readonly holdChild?: boolean; read
 		idGenerator,
 		platform: process.platform,
 		interactionMode: "print",
-		...(options.siblings
-			? { capacity: { processMaximumConcurrency: 8, graphMaximumConcurrency: 1 } }
-			: {}),
+		...(options.siblings ? { capacity: { processMaximumConcurrency: 8, graphMaximumConcurrency: 1 } } : {}),
 		openPrivateSession: (sessionId) =>
 			sessions.open({
 				workspace: { id: "workspace:test", path: workspace.root },

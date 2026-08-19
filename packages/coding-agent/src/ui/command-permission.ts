@@ -13,10 +13,7 @@ import {
 
 export type CommandPermissionAskRequest = CommandPermissionRequest & { readonly prompt: string };
 
-export type CommandPermissionWaitListener = (
-	request: CommandPermissionAskRequest,
-	waiting: boolean,
-) => void;
+export type CommandPermissionWaitListener = (request: CommandPermissionAskRequest, waiting: boolean) => void;
 
 class CommandPermissionComponent extends Component {
 	readonly #prompt: string;

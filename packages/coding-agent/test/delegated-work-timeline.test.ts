@@ -221,9 +221,7 @@ function acceptParentDelegate(timeline: SemanticTimeline): void {
 }
 
 function delegatedChildren(timeline: SemanticTimeline) {
-	const delegate = timeline.entries.find(
-		(entry) => entry.kind === "tool" && entry.invocation.toolName === "delegate",
-	);
+	const delegate = timeline.entries.find((entry) => entry.kind === "tool" && entry.invocation.toolName === "delegate");
 	if (!delegate || delegate.kind !== "tool") throw new Error("parent delegate Tool is missing");
 	return delegate.delegated ?? [];
 }
@@ -310,12 +308,7 @@ function itemSnapshot(
 	};
 }
 
-function childInvocation(
-	id: string,
-	providerId: string,
-	toolName: string,
-	arguments_: Record<string, unknown>,
-) {
+function childInvocation(id: string, providerId: string, toolName: string, arguments_: Record<string, unknown>) {
 	return {
 		id,
 		resultMessageId: `result-${id}`,
