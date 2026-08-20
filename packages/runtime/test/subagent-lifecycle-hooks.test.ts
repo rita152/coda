@@ -140,8 +140,7 @@ async function openDelegatedAgent(lifecycleHooks: LifecycleHookHost) {
 			model: selection.model,
 			revision: `test:${selection.model.id}`,
 			stream: (context, options) => faux.streamSimple(selection.model, context, { ...options, runtime }),
-			complete: (context, options) =>
-				faux.streamSimple(selection.model, context, { ...options, runtime }).result(),
+			complete: (context, options) => faux.streamSimple(selection.model, context, { ...options, runtime }).result(),
 			dispose: () => undefined,
 		}),
 	};

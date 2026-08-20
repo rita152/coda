@@ -234,8 +234,8 @@ The immutable model-visible projection of one MCP Tool Catalog frozen for a Run.
 _Avoid_: MCP Tool Catalog, live Server state
 
 **MCP Mention**:
-An explicit `$name` token that admits one MCP Tool or every Tool from one MCP Server into this Run's MCP Tool Snapshot. A short name shared with a Skill resolves to the Skill.
-_Avoid_: auto-exposed MCP Tool, Slash MCP, plugin invocation
+An explicit `$name` token that records an immutable presence assertion for one MCP Tool or every Tool from one MCP Server in a Prepared Run. Ready model-visible MCP Tools are already exposed directly; an unresolved assertion fails Run preparation, and a short name shared with a Skill resolves to the Skill.
+_Avoid_: Tool permission, Tool invocation, Slash MCP, plugin invocation
 
 **MCP Elicitation**:
 A Server-identified request for explicit user input while an MCP Tool Invocation is active, answered with accept, decline, or cancel.
@@ -305,6 +305,26 @@ _Avoid_: MCP Server Trust, Tool Invocation
 A portable package rooted at `plugin.json` that groups optional Skills and MCP Server declarations without granting either execution authority.
 _Avoid_: generic plugin container, client extension, Skill
 
+**Plugin Source**:
+A Coda-managed catalogue or direct origin that identifies available Agent Plugin revisions for installation without changing their package protocol.
+_Avoid_: Agent Plugin, package format, capability registry
+
+**Plugin Installation**:
+A user- or Workspace-scoped client record selecting one exact Agent Plugin revision from one Plugin Source, independently from whether that package is enabled or trusted.
+_Avoid_: Plugin Snapshot, package directory, loaded plugin
+
+**Plugin Enablement**:
+The user-controlled decision that lets one Plugin Installation contribute candidates to future Runs; it neither validates the package nor grants MCP Server Trust.
+_Avoid_: installation, package validity, Project Trust
+
+**Plugin Namespace**:
+The stable client-visible prefix derived from an Agent Plugin's manifest identity that scopes its Skill and MCP contributions independently of installation location or package revision.
+_Avoid_: installation slot, cache path, hash identity
+
+**Plugin Inventory**:
+The deterministic collection of resolved Plugin Installations, Plugin Snapshots, enablement decisions, and diagnostics produced by one client refresh before capability admission.
+_Avoid_: Plugin Snapshot, Skill Inventory, Run Capability Lease
+
 **Plugin Snapshot**:
 The immutable, diagnostic-bearing result of loading one Agent Plugin package before Coding Agent settings, trust, and Run admission are applied.
 _Avoid_: Run Capability Lease, live plugin, capability source
@@ -330,12 +350,16 @@ The bounded model-visible projection of one Skill Snapshot: Skills that allow im
 _Avoid_: Model Catalog, Skill Inventory
 
 **Skill Activation**:
-The exact-revision Skill body, base directory, arguments, and bounded resource references loaded through an explicit user reference or model Tool Invocation.
+The exact-revision, bounded raw `SKILL.md` content, base directory, and arguments loaded through an explicit user reference or model Tool Invocation; related files remain available only through ordinary Tools.
 _Avoid_: script execution, Skill Catalog, Tool execution
 
 **Skill Mention**:
 An explicit `$name` token that selects a Skill for this Run's user-selected context.
 _Avoid_: Slash Skill, auto-loaded Skill body, @skill
+
+**Skill MCP Dependency**:
+A client-owned MCP Server configuration proposed by an explicitly selected Skill, requiring canonical conflict checks and user consent before persistence; the declaration itself grants no Tool authority.
+_Avoid_: Plugin MCP Server, automatic install, Tool permission
 
 **Prompt Builder**:
 The versioned private Worker Runtime component that deterministically assembles one Run's System Prompt from Run Capability contributions, Workspace facts, and trusted project instructions.

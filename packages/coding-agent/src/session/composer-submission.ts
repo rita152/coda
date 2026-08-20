@@ -19,4 +19,16 @@ export interface ComposerSubmission {
 	readonly text: string;
 	readonly references?: readonly ComposerExtensionReference[];
 	readonly queueItemId?: string;
+	/** Host-only selection retained so a durable Follow-up recreates the same Run catalog. */
+	readonly capabilitySelections?: RunCapabilitySelections;
 }
+
+export type RunCapabilitySelectionValue =
+	| null
+	| boolean
+	| number
+	| string
+	| readonly RunCapabilitySelectionValue[]
+	| { readonly [key: string]: RunCapabilitySelectionValue };
+
+export type RunCapabilitySelections = Readonly<Record<string, RunCapabilitySelectionValue>>;

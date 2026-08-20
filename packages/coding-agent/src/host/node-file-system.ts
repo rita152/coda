@@ -1,5 +1,18 @@
 import type { Stats } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rmdir, stat, unlink } from "node:fs/promises";
+import {
+	chmod,
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	readFile,
+	realpath,
+	rename,
+	rm,
+	rmdir,
+	stat,
+	unlink,
+} from "node:fs/promises";
 import type { DirectoryEntry, FileKind, FileStatus, FileSystem, WritableFile } from "./file-system.ts";
 
 function kindOf(status: Stats): FileKind {
@@ -53,6 +66,7 @@ export function createNodeFileSystem(): FileSystem {
 		rename,
 		removeFile: unlink,
 		removeDirectory: rmdir,
+		removeTree: async (path) => rm(path, { recursive: true, force: true }),
 		setMode: chmod,
 	};
 }

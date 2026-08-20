@@ -106,6 +106,45 @@ describe("Session facade", () => {
 		await restored.close();
 	});
 
+	it("round-trips a durable Follow-up's immutable Run capability selection", async () => {
+		let id = 0;
+		const manager = new InMemorySessionManager({
+			clock: { now: () => 1_040 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+		});
+		const session = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+		});
+		const queueItemId = "queue:capability" as QueueItemId;
+		const capabilitySelections = { mcp: { toolIds: ["mcp:docs:search"] } } as const;
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: {
+				id: "submission:capability",
+				kind: "follow_up",
+				text: "Use $search",
+				queueItemId,
+				capabilitySelections,
+			},
+		});
+		await session.record({
+			type: "follow_up_enqueued",
+			item: { id: queueItemId, content: "Use $search" },
+		});
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		const restored = await manager.open({
+			workspace: { id: "workspace-id", path: "/workspace" },
+			mode: "interactive",
+			resumeId: sessionId,
+		});
+		expect(restored.composerSubmissions).toEqual([expect.objectContaining({ queueItemId, capabilitySelections })]);
+		expect(restored.seed.pendingFollowUps).toEqual([{ id: queueItemId, content: "Use $search" }]);
+		await restored.close();
+	});
+
 	it("persists reclaiming a failed Follow-up as a distinct recoverability tombstone", async () => {
 		let id = 0;
 		const manager = new InMemorySessionManager({

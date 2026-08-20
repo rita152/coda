@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { MutableModels } from "@coda/ai";
 import type { McpConnector, McpElicitationResult } from "@coda/mcp";
@@ -24,6 +24,7 @@ import {
 import { HELP, parseArguments, runControlConfiguration } from "./app/argument-parsing.ts";
 import { runInteractiveApplication } from "./app/interactive-run.ts";
 import { createAttachmentPreparer } from "./app/interactive-session-options.ts";
+import { createApplicationPluginServices } from "./app/plugin-management.ts";
 import { prepareUserPrompt } from "./app/prepare-user-prompt.ts";
 import { runPrint } from "./app/print-run.ts";
 import {
@@ -35,6 +36,7 @@ import {
 	type ProjectPluginSource,
 	selectInitialModel,
 } from "./app/project-runtime.ts";
+import { createSessionSkillMcpDependencyPreparation } from "./app/skill-mcp-dependencies.ts";
 import {
 	mcpTrustDecision,
 	projectTrustDecision,
@@ -59,7 +61,7 @@ import { hookReviewText, inspectHookConfiguration, trustAllHooks } from "./hooks
 import { CommandLifecycleHookHost } from "./hooks/manager.ts";
 import { type CommandPermissionAsk, PermissionLifecycleHookHost } from "./hooks/permission-host.ts";
 import type { ApplicationIO } from "./host/application-io.ts";
-import type { FileSystem } from "./host/file-system.ts";
+import { type FileStatus, type FileSystem, isFileSystemError } from "./host/file-system.ts";
 import type { ProcessRunner, ProcessSessionRunner } from "./host/process-runner.ts";
 import { inspectMcpConfiguration } from "./mcp/config.ts";
 import type { McpAgentElicitation } from "./mcp/run-capability.ts";
@@ -72,7 +74,7 @@ import { InMemorySessionManager } from "./session/memory-session-manager.ts";
 import { summarizeSessionRecords } from "./session/session-summary.ts";
 import type { SessionManager } from "./session/types.ts";
 import { loadProjectInstructions } from "./settings/project-context.ts";
-import type { SettingsStore } from "./settings/types.ts";
+import type { SettingsStore, UserSettings } from "./settings/types.ts";
 import type { SkillWatcherFactory } from "./skills/watcher.ts";
 import {
 	createWebRuntime,
@@ -84,7 +86,8 @@ import { InteractiveCommandPermissionHandler } from "./ui/command-permission.ts"
 import { FullScreenOutputGate } from "./ui/full-screen-output.ts";
 import { InteractiveMcpElicitationHandler } from "./ui/mcp-elicitation.ts";
 import { type InteractiveProcessLifecycle, InteractiveTerminationError } from "./ui/process-lifecycle.ts";
-import { confirmFromTerminal } from "./ui/prompts.ts";
+import { confirmFromTerminal, selectFromTerminal } from "./ui/prompts.ts";
+import { InteractiveSkillMcpDependencyHandler } from "./ui/skill-mcp-dependency.ts";
 
 export type { ApplicationIO, ApplicationOutput } from "./host/application-io.ts";
 export type { SettingsStore, UserSettings } from "./settings/types.ts";
@@ -152,6 +155,125 @@ export interface CodingAgentApplication {
 	run(args: readonly string[]): Promise<number>;
 }
 
+interface PluginDataDirectoryLease {
+	readonly path: string;
+	readonly device?: string;
+	readonly inode?: string;
+	readonly requireOwnerWriteExecute?: true;
+}
+
+const OWNER_WRITE_EXECUTE = 0o300;
+
+function pluginDataPathIsContained(root: string, target: string): boolean {
+	const fromRoot = relative(root, target);
+	return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
+}
+
+function pluginDataIdentityMatches(lease: PluginDataDirectoryLease, status: FileStatus): boolean {
+	return (
+		lease.device === undefined ||
+		lease.inode === undefined ||
+		status.device === undefined ||
+		status.inode === undefined ||
+		(lease.device === status.device && lease.inode === status.inode)
+	);
+}
+
+async function assertPluginDataDirectoryLease(
+	fileSystem: FileSystem,
+	lease: PluginDataDirectoryLease,
+	label: string,
+): Promise<void> {
+	const status = await fileSystem.lstat(lease.path);
+	if (
+		status.kind !== "directory" ||
+		!pluginDataIdentityMatches(lease, status) ||
+		(lease.requireOwnerWriteExecute && (status.mode & OWNER_WRITE_EXECUTE) !== OWNER_WRITE_EXECUTE)
+	) {
+		throw new Error(`${label} changed after it was validated`);
+	}
+	if (relative(lease.path, await fileSystem.realpath(lease.path)) !== "") {
+		throw new Error(`${label} changed after it was validated`);
+	}
+}
+
+async function ensurePluginDataChild(
+	fileSystem: FileSystem,
+	parent: PluginDataDirectoryLease,
+	name: string,
+	label: string,
+): Promise<PluginDataDirectoryLease> {
+	await assertPluginDataDirectoryLease(fileSystem, parent, "Plugin data parent");
+	const path = join(parent.path, name);
+	let status: FileStatus;
+	try {
+		status = await fileSystem.lstat(path);
+	} catch (error) {
+		if (!isFileSystemError(error, "ENOENT")) throw error;
+		try {
+			await fileSystem.makeDirectory(path, { mode: 0o700 });
+		} catch (mkdirError) {
+			if (!isFileSystemError(mkdirError, "EEXIST")) throw mkdirError;
+		}
+		status = await fileSystem.lstat(path);
+	}
+	if (status.kind !== "directory") throw new Error(`${label} must be a real directory`);
+	const canonical = await fileSystem.realpath(path);
+	if (relative(path, canonical) !== "" || !pluginDataPathIsContained(parent.path, canonical)) {
+		throw new Error(`${label} resolves outside its client-owned parent`);
+	}
+	const canonicalStatus = await fileSystem.lstat(canonical);
+	if ((canonicalStatus.mode & OWNER_WRITE_EXECUTE) !== OWNER_WRITE_EXECUTE) {
+		throw new Error(`${label} must be owner-writable and owner-searchable`);
+	}
+	const lease = Object.freeze({
+		path: canonical,
+		requireOwnerWriteExecute: true as const,
+		...(canonicalStatus.device === undefined ? {} : { device: canonicalStatus.device }),
+		...(canonicalStatus.inode === undefined ? {} : { inode: canonicalStatus.inode }),
+	});
+	if (canonicalStatus.kind !== "directory" || !pluginDataIdentityMatches(lease, status)) {
+		throw new Error(`${label} changed while it was validated`);
+	}
+	await assertPluginDataDirectoryLease(fileSystem, lease, label);
+	return lease;
+}
+
+async function preparePluginDataRoot(fileSystem: FileSystem, homeDirectory: string): Promise<PluginDataDirectoryLease> {
+	const canonicalHome = await fileSystem.realpath(homeDirectory);
+	const homeStatus = await fileSystem.lstat(canonicalHome);
+	if (homeStatus.kind !== "directory") throw new Error("Home directory must be a real directory");
+	const home = Object.freeze({
+		path: canonicalHome,
+		...(homeStatus.device === undefined ? {} : { device: homeStatus.device }),
+		...(homeStatus.inode === undefined ? {} : { inode: homeStatus.inode }),
+	});
+	const codaData = await ensurePluginDataChild(fileSystem, home, ".coda", "Coda data directory");
+	return ensurePluginDataChild(fileSystem, codaData, "plugin-data", "Plugin dataRoot");
+}
+
+async function preparePluginDataDirectory(
+	fileSystem: FileSystem,
+	configuredDataRoot: string,
+	dataRoot: PluginDataDirectoryLease,
+	requestedDataDirectory: string,
+): Promise<PluginDataDirectoryLease> {
+	if (!isAbsolute(requestedDataDirectory)) {
+		throw new Error("Plugin dataDirectory must be absolute");
+	}
+	const childName = relative(configuredDataRoot, requestedDataDirectory);
+	if (
+		childName === "" ||
+		childName === ".." ||
+		childName.startsWith(`..${sep}`) ||
+		isAbsolute(childName) ||
+		childName.includes(sep)
+	) {
+		throw new Error("Plugin dataDirectory must be a direct child of the client Plugin dataRoot");
+	}
+	return ensurePluginDataChild(fileSystem, dataRoot, childName, "Plugin dataDirectory");
+}
+
 export function createCodingAgentApplication(providedOptions: CodingAgentApplicationOptions): CodingAgentApplication {
 	const fullScreenOutput = providedOptions.fullScreenOutput ?? new FullScreenOutputGate(providedOptions.io);
 	const options: CodingAgentApplicationOptions = {
@@ -180,6 +302,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					sandboxMode: () => activeSandboxModeState.current,
 				})
 			: unavailableWebRuntime;
+	const pluginServices = createApplicationPluginServices({
+		homeDirectory: options.runtime.homeDirectory,
+		cwd: options.runtime.cwd,
+		environment: options.runtime.environment,
+		fileSystem: options.fileSystem,
+		processRunner: options.processRunner,
+		idGenerator: options.runtime.idGenerator,
+		settings: options.settings,
+	});
 	let providersRestored = false;
 	let precedingRun: Promise<void> = Promise.resolve();
 	return {
@@ -207,6 +338,20 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					}
 					if (parsed.action === "skills-validate") {
 						return validateSkillPath(parsed.skillsPath!, options, parsed.output);
+					}
+					if (parsed.action === "plugin") {
+						if (parsed.workspace === undefined) return await pluginServices.dispatch(parsed.plugin!, options.io);
+						const { workspace } = await resolveWorkspaceContext(parsed.workspace, options);
+						const deactivate = pluginServices.activateProjectRefresh(
+							async () => undefined,
+							undefined,
+							workspace.root,
+						);
+						try {
+							return await pluginServices.dispatch(parsed.plugin!, options.io);
+						} finally {
+							deactivate();
+						}
 					}
 					const maintenanceDiagnostics = createMaintenanceDiagnostics(options);
 					const cleanupExit = dispatchMaintenanceCleanup({
@@ -277,6 +422,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 					});
 					const workspaceResources = createWorkspaceSessionResources();
 					let closeProjectUi: (() => void) | undefined;
+					let deactivateProjectPluginRefresh: (() => void) | undefined;
 					let sessionRuntime: OpenedSessionRuntime | undefined;
 					const closeRuntime = async (): Promise<void> => {
 						const failures: unknown[] = [];
@@ -345,19 +491,45 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								);
 							}
 							if (projectTrust.updatedSettings && projectTrust.trustRecord) {
-								settings = projectTrust.updatedSettings;
-								await options.settings.save(settings);
-								await session.record({ type: "project_trust_changed", trust: projectTrust.trustRecord });
+								const trustRecord = projectTrust.trustRecord;
+								const committed = await updateSettingsTransaction(
+									options.settings,
+									(current) =>
+										projectTrustDecision({
+											workspace: workspace.root,
+											instructions: projectInstructions,
+											settings: current,
+											authorized: true,
+										}).updatedSettings ?? current,
+								);
+								settings = committed.settings;
+								if (committed.changed) {
+									await session.record({ type: "project_trust_changed", trust: trustRecord });
+								}
 							}
 						}
+						const managedInstallationSnapshot = await pluginServices.installations();
+						const managedInstallations = managedInstallationSnapshot.installations;
 						const pluginDiscoveryOptions = {
 							workspace: workspace.root,
 							userHome: options.runtime.homeDirectory,
 							dataRoot: join(options.runtime.homeDirectory, ".coda", "plugin-data"),
 							fileSystem: options.fileSystem,
+							managedInstallations,
+							managedInstallationVerifications: managedInstallationSnapshot.verifications,
+							verifyManagedInstallation: (
+								record: (typeof managedInstallations)[number],
+								verifyOptions?: { readonly signal?: AbortSignal },
+							) => pluginServices.installationStore.verify(record, verifyOptions),
+							...(settings.plugins ? { enablement: settings.plugins } : {}),
 						};
 						const codingPluginsManager = createCodingPluginsManager(pluginDiscoveryOptions);
 						let codingPlugins: CodingPluginsSnapshot = await codingPluginsManager.refresh();
+						const emptyPluginMcpDiagnostics: readonly CodingPluginMcpDiagnostic[] = Object.freeze([]);
+						const pluginMcpDiagnosticsByInventory = new WeakMap<
+							CodingPluginsSnapshot,
+							readonly CodingPluginMcpDiagnostic[]
+						>();
 						const reportPluginDiagnostics = async (
 							diagnostics: CodingPluginsSnapshot["diagnostics"] | readonly CodingPluginMcpDiagnostic[],
 						): Promise<void> => {
@@ -371,21 +543,49 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						};
 						await reportPluginDiagnostics(codingPlugins.diagnostics);
 						const pluginSource: ProjectPluginSource = Object.freeze({
-							watchRoots: Object.freeze([
-								join(workspace.root, ".agents", "plugins"),
-								join(options.runtime.homeDirectory, ".agents", "plugins"),
-							]),
+							get watchRoots() {
+								const canonicalLinkedRoots = codingPlugins.installations
+									.filter(({ origin }) => origin.root !== origin.pluginRoot)
+									.map(({ origin }) => origin.pluginRoot)
+									.sort();
+								return Object.freeze([
+									...new Set([
+										join(workspace.root, ".agents", "plugins"),
+										join(options.runtime.homeDirectory, ".agents", "plugins"),
+										join(options.runtime.homeDirectory, ".coda", "plugins", "installations"),
+										...canonicalLinkedRoots,
+									]),
+								]);
+							},
+							inventory: () => codingPlugins,
 							skillSnapshots: () => codingPlugins.skills,
-							refresh: async () => {
-								const refreshed = await codingPluginsManager.refresh();
+							refresh: async (refreshedSettings: UserSettings) => {
+								const refreshedInstallationSnapshot = await pluginServices.installations();
+								const refreshed = await codingPluginsManager.refresh({
+									enablement: refreshedSettings.plugins ?? {},
+									managedInstallations: refreshedInstallationSnapshot.installations,
+									managedInstallationVerifications: refreshedInstallationSnapshot.verifications,
+								});
 								codingPlugins = refreshed;
 								await reportPluginDiagnostics(refreshed.diagnostics);
+								return refreshed;
 							},
+							retainRunRevisions: (inventory: CodingPluginsSnapshot, signal?: AbortSignal) =>
+								pluginServices.installationStore.retainRevisions(
+									inventory.installations
+										.filter(({ source }) => source !== "workspace-local" && source !== "user-local")
+										.map(({ origin }) => origin.root),
+									{ signal },
+								),
+							collectRetiredRevisions: (signal?: AbortSignal) =>
+								pluginServices.installationStore.collectRetiredRevisions({ signal }),
 							mcpDefinitions: async ({
 								settings: pluginSettings,
 								reservedServerIds,
 							}: Parameters<ProjectPluginSource["mcpDefinitions"]>[0]) => {
-								const trustedSources = codingPlugins.mcpSources.filter(
+								const inventory = codingPlugins;
+								const configuredPluginDataRoot = join(options.runtime.homeDirectory, ".coda", "plugin-data");
+								const trustedSources = inventory.mcpSources.filter(
 									(source) =>
 										source.servers.length > 0 &&
 										(!source.requiresWorkspaceTrust ||
@@ -396,32 +596,64 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 													record.sha256 === source.sha256,
 											)),
 								);
+								let pluginDataRoot: PluginDataDirectoryLease | undefined;
+								if (trustedSources.some((source) => source.servers.some(({ type }) => type === "stdio"))) {
+									try {
+										pluginDataRoot = await preparePluginDataRoot(
+											options.fileSystem,
+											options.runtime.homeDirectory,
+										);
+									} catch (error) {
+										await maintenanceDiagnostics({
+											code: "plugins.plugin-data-unavailable",
+											message: `Could not prepare client Plugin dataRoot: ${error instanceof Error ? error.message : String(error)}`,
+										});
+									}
+								}
 								const preparedSources: typeof trustedSources = [];
 								for (const source of trustedSources) {
+									let preparedSource = source;
 									try {
 										if (source.servers.some(({ type }) => type === "stdio")) {
-											await options.fileSystem.makeDirectory(source.plugin.dataDirectory, {
-												recursive: true,
-												mode: 0o700,
+											if (!pluginDataRoot) throw new Error("client Plugin dataRoot is unavailable");
+											const dataDirectory = await preparePluginDataDirectory(
+												options.fileSystem,
+												configuredPluginDataRoot,
+												pluginDataRoot,
+												source.plugin.dataDirectory,
+											);
+											preparedSource = Object.freeze({
+												...source,
+												plugin: Object.freeze({ ...source.plugin, dataDirectory: dataDirectory.path }),
 											});
-											await options.fileSystem.setMode(source.plugin.dataDirectory, 0o700);
 										}
 									} catch (error) {
 										await maintenanceDiagnostics({
 											code: "plugins.plugin-data-unavailable",
 											message: `Could not prepare Plugin data for ${source.plugin.snapshot.manifest.name}: ${error instanceof Error ? error.message : String(error)}`,
 										});
+										preparedSource = Object.freeze({
+											...source,
+											servers: Object.freeze(source.servers.filter(({ type }) => type !== "stdio")),
+										});
 									}
-									preparedSources.push(source);
+									if (preparedSource.servers.length > 0) preparedSources.push(preparedSource);
 								}
 								const materialized = await materializeCodingPluginMcpDefinitions({
 									sources: preparedSources,
+									...(pluginDataRoot ? { dataRoot: pluginDataRoot.path } : {}),
 									baseEnvironment: options.runtime.environment,
 									platform: options.runtime.platform,
 									reservedServerIds,
 								});
 								await reportPluginDiagnostics(materialized.diagnostics);
-								return materialized.definitions;
+								pluginMcpDiagnosticsByInventory.set(inventory, materialized.diagnostics);
+								return Object.freeze({
+									definitions: materialized.definitions,
+									agentPluginServerIds: Object.freeze(
+										materialized.entries.map(({ definition }) => definition.id),
+									),
+								});
 							},
 						});
 						const projectSkills = await loadProjectSkills({
@@ -438,6 +670,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							environment: options.runtime.environment,
 						});
 						if (mcpConfiguration.workspace?.trust === "untrusted") {
+							const workspaceMcp = mcpConfiguration.workspace;
 							const trustedInteractively =
 								!parsed.trustProjectMcp && interactiveRuntime
 									? await confirmFromTerminal(
@@ -452,9 +685,21 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								authorized: parsed.trustProjectMcp || trustedInteractively,
 							});
 							if (mcpTrust.updatedSettings && mcpTrust.trustRecord) {
-								settings = mcpTrust.updatedSettings;
-								await options.settings.save(settings);
-								await session.record({ type: "mcp_trust_changed", trust: mcpTrust.trustRecord });
+								const trustRecord = mcpTrust.trustRecord;
+								const committed = await updateSettingsTransaction(
+									options.settings,
+									(current) =>
+										mcpTrustDecision({
+											workspace: workspace.root,
+											snapshot: workspaceMcp,
+											settings: current,
+											authorized: true,
+										}).updatedSettings ?? current,
+								);
+								settings = committed.settings;
+								if (committed.changed) {
+									await session.record({ type: "mcp_trust_changed", trust: trustRecord });
+								}
 								mcpConfiguration = await inspectMcpConfiguration({
 									workspace: workspace.root,
 									fileSystem: options.fileSystem,
@@ -495,9 +740,27 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								authorized: parsed.trustProjectMcp || trustedInteractively,
 							});
 							if (mcpTrust.updatedSettings && mcpTrust.trustRecord) {
-								settings = mcpTrust.updatedSettings;
-								await options.settings.save(settings);
-								await session.record({ type: "mcp_trust_changed", trust: mcpTrust.trustRecord });
+								const trustRecord = mcpTrust.trustRecord;
+								const committed = await updateSettingsTransaction(
+									options.settings,
+									(current) =>
+										mcpTrustDecision({
+											workspace: workspace.root,
+											snapshot: {
+												path: source.path,
+												sha256: source.sha256,
+												trust: "untrusted",
+												serverCount: source.servers.length,
+												servers: [],
+											},
+											settings: current,
+											authorized: true,
+										}).updatedSettings ?? current,
+								);
+								settings = committed.settings;
+								if (committed.changed) {
+									await session.record({ type: "mcp_trust_changed", trust: trustRecord });
+								}
 							} else if (!mcpTrust.trusted && !interactiveRuntime) {
 								await options.io.stderr.write(
 									`coda: Workspace Agent Plugin ${source.plugin.snapshot.manifest.name} MCP configuration ${source.sha256} is untrusted; its Servers were omitted\n`,
@@ -510,7 +773,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						});
 						mcpConfiguration = Object.freeze({
 							...mcpConfiguration,
-							definitions: Object.freeze([...mcpConfiguration.definitions, ...pluginMcpDefinitions]),
+							definitions: Object.freeze([...mcpConfiguration.definitions, ...pluginMcpDefinitions.definitions]),
 						});
 						let hookConfiguration = await inspectHookConfiguration({
 							workspace: workspace.root,
@@ -531,8 +794,11 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 									? await confirmFromTerminal(interactiveRuntime, hookReviewText(hookConfiguration))
 									: false;
 							if (parsed.trustHooks || trustedInteractively) {
-								settings = trustAllHooks(settings, hookConfiguration);
-								await options.settings.save(settings);
+								settings = (
+									await updateSettingsTransaction(options.settings, (current) =>
+										trustAllHooks(current, hookConfiguration),
+									)
+								).settings;
 								hookConfiguration = await inspectHookConfiguration({
 									workspace: workspace.root,
 									homeDirectory: options.runtime.homeDirectory,
@@ -703,16 +969,74 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							settings: settingsState,
 							workspace,
 							mcpConfiguration,
+							agentPluginServerIds: pluginMcpDefinitions.agentPluginServerIds,
 							skills: projectSkills,
 							interactive: interactiveRuntime !== undefined,
 							diagnostics: maintenanceDiagnostics,
 							resources: workspaceResources,
 							hooks: commandHooks,
 						});
+						deactivateProjectPluginRefresh = pluginServices.activateProjectRefresh(
+							projectServices.refreshProject,
+							() => {
+								const catalog = projectServices.capabilityCatalogSnapshot();
+								return Object.freeze({
+									...catalog,
+									pluginMcpDiagnostics:
+										pluginMcpDiagnosticsByInventory.get(catalog.plugins) ?? emptyPluginMcpDiagnostics,
+								});
+							},
+							workspace.root,
+							projectServices.markProjectDirty,
+							interactiveRuntime
+								? {
+										...(parsed.trustProjectMcp ? { review: () => true } : {}),
+										onCommitted: (record) => session.record({ type: "mcp_trust_changed", trust: record }),
+									}
+								: undefined,
+						);
 						closeProjectUi = projectServices.closeUi;
-						const { mcpRegistry, commandRegistry, skillsCommand, mcpCommand, hooksCommand } = projectServices;
+						const {
+							mcpRegistry,
+							commandRegistry,
+							skillsCommand,
+							mcpCommand,
+							hooksCommand,
+							capabilityCatalogSnapshot,
+						} = projectServices;
 						const skillsManager = projectSkills.manager;
 						const skillsSnapshot = projectSkills.snapshot;
+						const interactiveSkillMcpDependencies = interactiveRuntime
+							? new InteractiveSkillMcpDependencyHandler({
+									fallback: async (request) =>
+										(await selectFromTerminal(
+											interactiveRuntime,
+											`${request.title}\n\n${request.message}`,
+											request.choices,
+										)) === "install"
+											? "install"
+											: "continue",
+									canUseFallback: () => !fullScreenOutput.active,
+								})
+							: undefined;
+						const createSkillMcpDependencyPreparation = (sessionId: string) =>
+							createSessionSkillMcpDependencyPreparation({
+								settings: settingsState,
+								store: options.settings,
+								refreshProject: projectServices.refreshProject,
+								configuredServers: projectServices.configuredMcpServers,
+								capabilityCatalogSnapshot,
+								approvalPolicy: () => permissionPolicy.snapshot().approvalPolicy,
+								sandboxMode: () => sandboxModeState.current,
+								...(interactiveSkillMcpDependencies
+									? { decide: interactiveSkillMcpDependencies.forSession(sessionId) }
+									: {}),
+								reportDiagnostic: (diagnostic) =>
+									maintenanceDiagnostics({ code: diagnostic.code, message: diagnostic.message }),
+							});
+						const primarySkillMcpDependencyPreparation = createSkillMcpDependencyPreparation(
+							session.descriptor.id,
+						);
 						const auth = await authenticateInitialModel({
 							options,
 							model,
@@ -739,7 +1063,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							disableRunBudget: parsed.disableRunBudget,
 							maxOutputTokens: parsed.maxOutputTokens,
 							skillsManager,
-							mcpRegistry,
+							projectCapabilities: projectServices.acquireRunCapabilityBundle,
+							mcpDiagnostic: (diagnostic) =>
+								maintenanceDiagnostics({ code: diagnostic.code, message: diagnostic.message }),
 							projectInstructions,
 							lifecycleHooks,
 						});
@@ -765,12 +1091,15 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 						for (const path of parsed.imagePaths) {
 							initialAttachmentIds.push((await mediaLibrary.ingestPath(path)).id);
 						}
+						const initialCapabilityCatalog = capabilityCatalogSnapshot();
 						const initialInput = await prepareUserPrompt({
 							text: parsed.prompt,
 							attachmentIds: initialAttachmentIds,
 							mediaLibrary,
-							skills: skillsSnapshot,
-							...(mcpRegistry ? { mcpRegistry } : {}),
+							skills: initialCapabilityCatalog.skills,
+							projectRevision: initialCapabilityCatalog.revision,
+							mcpTools: initialCapabilityCatalog.mcp.tools,
+							prepareSkillMcpDependencies: primarySkillMcpDependencyPreparation,
 						});
 						const prepareAttachments = createAttachmentPreparer({
 							restoredMedia,
@@ -779,6 +1108,9 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							inputResources,
 						});
 						if (parsed.mode === "interactive") {
+							if (!interactiveSkillMcpDependencies) {
+								throw new Error("Interactive Skill MCP dependency prompts are unavailable");
+							}
 							return await runInteractiveApplication({
 								options: {
 									...options,
@@ -800,7 +1132,12 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 								skillsManager,
 								skillsSnapshot,
 								skillsCommand,
+								pluginsCommand: pluginServices.command,
 								mcpCommand,
+								projectCapabilityCatalog: capabilityCatalogSnapshot,
+								primarySkillMcpDependencyPreparation,
+								createSkillMcpDependencyPreparation,
+								skillMcpDependencies: interactiveSkillMcpDependencies,
 								...(mcpRegistry ? { mcpRegistry } : {}),
 								hooksCommand,
 								permissionsCommand,
@@ -838,6 +1175,7 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 							drainWorkspaceDiffSupplements: workspaceDiffs.drain,
 						});
 					} finally {
+						deactivateProjectPluginRefresh?.();
 						closeProjectUi?.();
 						await closeRuntime();
 					}
@@ -852,6 +1190,26 @@ export function createCodingAgentApplication(providedOptions: CodingAgentApplica
 			}
 		},
 	};
+}
+
+async function updateSettingsTransaction(
+	store: SettingsStore,
+	mutator: (settings: UserSettings) => UserSettings,
+): Promise<{ readonly settings: UserSettings; readonly changed: boolean }> {
+	let changed = false;
+	if (store.update) {
+		const settings = await store.update((current) => {
+			const next = mutator(current);
+			changed = next !== current;
+			return next;
+		});
+		return Object.freeze({ settings, changed });
+	}
+	const current = await store.load();
+	const settings = mutator(current);
+	changed = settings !== current;
+	if (changed) await store.save(settings);
+	return Object.freeze({ settings, changed });
 }
 
 const unavailableProviderDiscoveryFetch: typeof globalThis.fetch = async () => {

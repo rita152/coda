@@ -1,6 +1,12 @@
 import type { SkillCandidate, SkillId, SkillRoot, SkillsSnapshot } from "@coda/skills";
 import { allowsImplicitInvocation } from "./invocation.ts";
-import type { CodingSkillDiagnostic, CodingSkillOrigin, CodingSkillsSnapshot, ResolvedCodingSkill } from "./types.ts";
+import type {
+	CodingSkillDiagnostic,
+	CodingSkillOrigin,
+	CodingSkillSidecarMetadata,
+	CodingSkillsSnapshot,
+	ResolvedCodingSkill,
+} from "./types.ts";
 
 function compareText(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;
@@ -56,6 +62,9 @@ function qualifiedName(
 	origin: CodingSkillOrigin,
 	suffixLength = 8,
 ): string {
+	if (origin.kind === "plugin" && origin.pluginName) {
+		return `${origin.pluginName}:${candidate.metadata.name}`;
+	}
 	const suffix = String(candidate.id)
 		.replace(/^skill:/u, "")
 		.slice(-suffixLength);
@@ -82,9 +91,20 @@ function selectedOrigin(candidate: SkillCandidate<CodingSkillOrigin>): CodingSki
 export function createCodingSkillsSnapshot(options: {
 	readonly loader: SkillsSnapshot<CodingSkillOrigin>;
 	readonly roots?: readonly SkillRoot<CodingSkillOrigin>[];
-	readonly implicitInvocationById?: ReadonlyMap<SkillId, boolean>;
+	readonly sidecarMetadataById?: ReadonlyMap<SkillId, CodingSkillSidecarMetadata>;
+	readonly sidecarDiagnostics?: readonly CodingSkillDiagnostic[];
 }): CodingSkillsSnapshot {
-	const preliminary = options.loader.candidates.flatMap((candidate) => {
+	const candidates = Object.freeze(
+		options.loader.candidates.filter((candidate) => {
+			const products = options.sidecarMetadataById?.get(candidate.id)?.policy?.products;
+			return !products || products.length === 0 || products.includes("codex");
+		}),
+	);
+	const loader: SkillsSnapshot<CodingSkillOrigin> =
+		candidates.length === options.loader.candidates.length
+			? options.loader
+			: Object.freeze({ ...options.loader, candidates });
+	const preliminary = candidates.flatMap((candidate) => {
 		const origin = selectedOrigin(candidate);
 		if (!origin) return [];
 		return [
@@ -114,8 +134,9 @@ export function createCodingSkillsSnapshot(options: {
 		for (const entry of group) {
 			qualifiedCounts.set(entry.qualifiedName, (qualifiedCounts.get(entry.qualifiedName) ?? 0) + 1);
 		}
-		const resolved = group.map((entry, index) =>
-			Object.freeze({
+		const resolved = group.map((entry, index) => {
+			const sidecar = options.sidecarMetadataById?.get(entry.candidate.id);
+			return Object.freeze({
 				...entry,
 				qualifiedName:
 					qualifiedCounts.get(entry.qualifiedName) === 1
@@ -125,10 +146,13 @@ export function createCodingSkillsSnapshot(options: {
 				collisionCount: group.length,
 				implicitInvocation: allowsImplicitInvocation({
 					disableModelInvocation: entry.candidate.metadata.disableModelInvocation,
-					sidecarAllowImplicit: options.implicitInvocationById?.get(entry.candidate.id),
+					sidecarAllowImplicit: sidecar?.policy?.allowImplicitInvocation,
 				}),
-			}),
-		);
+				...(sidecar?.interface ? { interface: sidecar.interface } : {}),
+				...(sidecar?.dependencies ? { dependencies: sidecar.dependencies } : {}),
+				...(sidecar?.policy ? { policy: sidecar.policy } : {}),
+			});
+		});
 		resolvedSkills.push(...resolved);
 		const diagnostic = collisionDiagnostic(name, resolved);
 		if (diagnostic) productDiagnostics.push(diagnostic);
@@ -143,19 +167,23 @@ export function createCodingSkillsSnapshot(options: {
 		resolvedSkills.map((entry) => [entry.candidate.id, entry] as const),
 	);
 	return Object.freeze({
-		loader: options.loader,
+		loader,
 		roots: Object.freeze([...(options.roots ?? [])]),
-		candidates: options.loader.candidates,
+		candidates,
 		resolved: Object.freeze(resolvedSkills),
 		byId,
-		diagnostics: Object.freeze([...options.loader.diagnostics, ...productDiagnostics]),
+		diagnostics: Object.freeze([
+			...options.loader.diagnostics,
+			...(options.sidecarDiagnostics ?? []),
+			...productDiagnostics,
+		]),
 		activate: async (
 			id: SkillId,
 			activationOptions?: { readonly arguments?: string; readonly signal?: AbortSignal },
 		) => {
 			const entry = byId.get(id);
 			if (!entry) throw new Error(`Skill is not available in this snapshot: ${String(id)}`);
-			const result = await options.loader.activate(id, activationOptions);
+			const result = await loader.activate(id, activationOptions);
 			if (!result.ok) throw new Error(result.diagnostic.message);
 			return result.activation;
 		},

@@ -1,12 +1,29 @@
 import type { McpServerDefinition } from "@coda/mcp";
 import type { LoadedPluginSnapshot, PluginDiagnostic, PluginSnapshot } from "@coda/plugins";
 import type { SkillsSnapshot } from "@coda/skills";
+import type { CodingPluginInstallationRecord, CodingPluginInstallationVerification } from "./installation-store.ts";
 
 export type CodingPluginScope = "workspace" | "user";
+export const CODING_PLUGIN_LOCAL_SOURCES = Object.freeze(["workspace-local", "user-local"] as const);
+export type CodingPluginLocalSource = (typeof CODING_PLUGIN_LOCAL_SOURCES)[number];
+export type CodingPluginSource = CodingPluginLocalSource | (string & {});
+export type CodingPluginId = `${string}@${string}`;
+
+export function isCodingPluginLocalSource(value: unknown): value is CodingPluginLocalSource {
+	return value === "workspace-local" || value === "user-local";
+}
+
+export interface CodingPluginEnablement {
+	readonly enabled: boolean;
+}
+
+export type PluginEnablementSettings = Readonly<Partial<Record<CodingPluginId, CodingPluginEnablement>>>;
 
 export interface CodingPluginOrigin {
 	readonly scope: CodingPluginScope;
 	readonly slot: string;
+	readonly installationId?: CodingPluginId;
+	readonly pluginName?: string;
 	readonly root: string;
 	readonly pluginRoot: string;
 	readonly priority: number;
@@ -15,6 +32,11 @@ export interface CodingPluginOrigin {
 }
 
 export interface CodingPlugin {
+	readonly installationId: CodingPluginId;
+	readonly source: CodingPluginSource;
+	readonly enabled: boolean;
+	/** Exact, location-independent package content identity, including executable-bit semantics. */
+	readonly contentDigest: string;
 	readonly slot: string;
 	readonly origin: CodingPluginOrigin;
 	readonly dataDirectory: string;
@@ -63,7 +85,50 @@ export interface CodingPluginInventoryDiagnostic {
 	readonly path: string;
 }
 
-export type CodingPluginDiagnostic = PluginDiagnostic<CodingPluginOrigin> | CodingPluginInventoryDiagnostic;
+export interface CodingPluginUnsupportedDiscoveryRootDiagnostic {
+	readonly code: "plugin-discovery-root-unsupported";
+	readonly severity: "warning";
+	readonly phase: "discover";
+	readonly message: string;
+	readonly path: string;
+}
+
+export interface CodingPluginNamespaceCollisionDiagnostic {
+	readonly code: "plugin-namespace-collision";
+	readonly severity: "warning";
+	readonly phase: "discover";
+	readonly message: string;
+	readonly path: string;
+	readonly pluginName: string;
+}
+
+export interface CodingPluginInstallationCollisionDiagnostic {
+	readonly code: "plugin-installation-collision";
+	readonly severity: "warning";
+	readonly phase: "discover";
+	readonly message: string;
+	readonly path: string;
+	readonly pluginName: string;
+	readonly installationId: CodingPluginId;
+}
+
+export interface CodingPluginDisabledDiagnostic {
+	readonly code: "plugin-disabled";
+	readonly severity: "info";
+	readonly phase: "discover";
+	readonly message: string;
+	readonly path: string;
+	readonly pluginName: string;
+	readonly installationId: CodingPluginId;
+}
+
+export type CodingPluginDiagnostic =
+	| PluginDiagnostic<CodingPluginOrigin>
+	| CodingPluginInventoryDiagnostic
+	| CodingPluginUnsupportedDiscoveryRootDiagnostic
+	| CodingPluginNamespaceCollisionDiagnostic
+	| CodingPluginInstallationCollisionDiagnostic
+	| CodingPluginDisabledDiagnostic;
 
 export interface CodingPluginMcpDefinitionEntry {
 	readonly source: CodingPluginMcpSource;
@@ -78,6 +143,7 @@ export interface CodingPluginMcpDefinitionsSnapshot {
 }
 
 export interface CodingPluginsSnapshot {
+	readonly installations: readonly CodingPlugin[];
 	readonly plugins: readonly CodingPlugin[];
 	readonly snapshots: readonly PluginSnapshot<CodingPluginOrigin>[];
 	readonly skills: readonly SkillsSnapshot<CodingPluginOrigin>[];
@@ -87,5 +153,12 @@ export interface CodingPluginsSnapshot {
 
 export interface CodingPluginsManager {
 	readonly current: CodingPluginsSnapshot | undefined;
-	refresh(): Promise<CodingPluginsSnapshot>;
+	refresh(options?: CodingPluginsRefreshOptions): Promise<CodingPluginsSnapshot>;
+}
+
+export interface CodingPluginsRefreshOptions {
+	readonly enablement?: PluginEnablementSettings;
+	readonly managedInstallations?: readonly CodingPluginInstallationRecord[];
+	/** Store-owned results computed atomically with managedInstallations. */
+	readonly managedInstallationVerifications?: readonly CodingPluginInstallationVerification[];
 }

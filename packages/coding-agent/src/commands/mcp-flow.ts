@@ -18,7 +18,7 @@ export async function openMcpCommand(
 	argument: string | undefined,
 	options: McpCommandFlowOptions,
 ): Promise<void> {
-	const [action, serverId, ...extra] = argument?.trim().split(/\s+/u).filter(Boolean) ?? [];
+	const [action, serverSelector, ...extra] = argument?.trim().split(/\s+/u).filter(Boolean) ?? [];
 	if (extra.length > 0) throw new Error("Usage: /mcp [status|doctor|inspect|reload|reconnect] [server-id]");
 	if (!action) {
 		flow.open(await rootFlow(options));
@@ -26,25 +26,27 @@ export async function openMcpCommand(
 	}
 	switch (action) {
 		case "status":
-			if (serverId) throw new Error("Usage: /mcp status");
+			if (serverSelector) throw new Error("Usage: /mcp status");
 			flow.open(statusFlow(await options.snapshot()));
 			return;
 		case "doctor":
-			if (serverId) throw new Error("Usage: /mcp doctor");
+			if (serverSelector) throw new Error("Usage: /mcp doctor");
 			flow.open(doctorFlow(await options.snapshot()));
 			return;
 		case "inspect": {
 			const snapshot = await options.snapshot();
-			flow.open(serverId ? inspectServerFlow(snapshot, serverId) : inspectFlow(snapshot));
+			flow.open(serverSelector ? inspectServerFlow(snapshot, serverSelector) : inspectFlow(snapshot));
 			return;
 		}
 		case "reload":
-			if (serverId) throw new Error("Usage: /mcp reload");
+			if (serverSelector) throw new Error("Usage: /mcp reload");
 			flow.open(statusFlow(await options.reload()));
 			return;
 		case "reconnect":
-			if (serverId) {
-				flow.open(statusFlow(await options.reconnect(serverId)));
+			if (serverSelector) {
+				const snapshot = await options.snapshot();
+				const server = resolveServer(snapshot.host, serverSelector);
+				flow.open(statusFlow(await options.reconnect(server.id)));
 				return;
 			}
 			flow.open(reconnectFlow(await options.snapshot(), options));
@@ -109,7 +111,7 @@ function statusFlow(snapshot: McpCommandSnapshot): CommandFlowMenu {
 			snapshot.host.servers.length > 0
 				? snapshot.host.servers.map((server) => ({
 						id: server.id,
-						label: server.id,
+						label: server.semanticName,
 						description: serverDescription(server),
 						status: server.status,
 					}))
@@ -133,7 +135,7 @@ function doctorFlow(snapshot: McpCommandSnapshot): CommandFlowMenu {
 		...snapshot.host.diagnostics.map((diagnostic, index) => ({
 			id: `diagnostic:${index}`,
 			label: diagnostic.code,
-			description: `${diagnostic.serverId}${diagnostic.toolName ? `/${diagnostic.toolName}` : ""}: ${diagnostic.message}`,
+			description: `${diagnostic.serverSemanticName}${diagnostic.toolName ? `/${diagnostic.toolName}` : ""}: ${diagnostic.message}`,
 			status: "attention",
 		})),
 	];
@@ -153,7 +155,7 @@ function inspectFlow(snapshot: McpCommandSnapshot): CommandFlowMenu {
 			snapshot.host.servers.length > 0
 				? snapshot.host.servers.map((server) => ({
 						id: server.id,
-						label: server.id,
+						label: server.semanticName,
 						description: serverDescription(server),
 						onSelect: (navigation: CommandFlowNavigation) =>
 							navigation.push(inspectServerFlow(snapshot, server.id)),
@@ -162,19 +164,21 @@ function inspectFlow(snapshot: McpCommandSnapshot): CommandFlowMenu {
 	};
 }
 
-function inspectServerFlow(snapshot: McpCommandSnapshot, serverId: string): CommandFlowMenu {
-	const server = snapshot.host.servers.find(({ id }) => id === serverId);
-	if (!server) throw new Error(`Unknown MCP Server: ${serverId}`);
-	const tools = snapshot.host.tools.filter((tool) => tool.serverId === serverId);
+function inspectServerFlow(snapshot: McpCommandSnapshot, serverSelector: string): CommandFlowMenu {
+	const server = resolveServer(snapshot.host, serverSelector);
+	const tools = snapshot.host.tools.filter((tool) => tool.serverId === server.id);
 	return {
-		id: `mcp-inspect:${serverId}`,
-		title: `MCP / Inspect / ${serverId}`,
+		id: `mcp-inspect:${server.id}`,
+		title: `MCP / Inspect / ${server.semanticName}`,
 		filterable: true,
 		items:
 			tools.length > 0
 				? tools.map((tool) => ({
 						id: tool.id,
-						label: tool.name,
+						label:
+							tool.serverSemanticName === tool.serverId
+								? tool.name
+								: `${tool.serverSemanticName}/${tool.remoteName}`,
 						description: `${tool.remoteName} • ${tool.description}`,
 					}))
 				: [
@@ -196,7 +200,7 @@ function reconnectFlow(snapshot: McpCommandSnapshot, options: McpCommandFlowOpti
 			reconnectable.length > 0
 				? reconnectable.map((server) => ({
 						id: server.id,
-						label: server.id,
+						label: server.semanticName,
 						description: serverDescription(server),
 						status: server.status,
 						onSelect: async (navigation: CommandFlowNavigation) =>
@@ -204,4 +208,13 @@ function reconnectFlow(snapshot: McpCommandSnapshot, options: McpCommandFlowOpti
 					}))
 				: [{ id: "empty", label: "No reconnectable MCP Servers", disabledReason: "Nothing to reconnect" }],
 	};
+}
+
+function resolveServer(snapshot: McpHostSnapshot, selector: string): McpServerSnapshot {
+	const byId = snapshot.servers.find(({ id }) => id === selector);
+	if (byId) return byId;
+	const semanticMatches = snapshot.servers.filter(({ semanticName }) => semanticName === selector);
+	if (semanticMatches.length === 1) return semanticMatches[0]!;
+	if (semanticMatches.length > 1) throw new Error(`Ambiguous MCP Server: ${selector}`);
+	throw new Error(`Unknown MCP Server: ${selector}`);
 }

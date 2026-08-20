@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SkillFileSystem } from "@coda/skills";
@@ -64,8 +64,14 @@ describe("Agent Plugin snapshots", () => {
 		if (snapshot.status !== "loaded") throw new Error("expected a loaded plugin");
 
 		expectDeeplyFrozen(snapshot);
-		const dataDirectory = await temporaryDirectory("coda-plugins-data-");
-		const materialized = await snapshot.materializeMcp({ dataDirectory, platform: "linux" });
+		const dataRoot = await temporaryDirectory("coda-plugins-data-root-");
+		const dataDirectory = join(dataRoot, "snapshot");
+		await mkdir(dataDirectory);
+		const materialized = await snapshot.materializeMcp({
+			dataRoot: await realpath(dataRoot),
+			dataDirectory: await realpath(dataDirectory),
+			platform: "linux",
+		});
 		expectDeeplyFrozen(materialized);
 	});
 

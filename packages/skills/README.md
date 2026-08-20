@@ -21,8 +21,9 @@ const validation = validateAgentSkill({ text, directoryName: "review" });
 
 The caller supplies absolute roots, opaque provenance, filesystem access, limits, and a symlink policy. Discovery
 retains every same-name Candidate, collapses only identical canonical `SKILL.md` paths, and returns deterministic,
-immutable snapshots. Activation rereads the exact canonical file, rejects a changed revision, strips frontmatter, and
-returns the Markdown body, canonical base directory, normalized arguments, bounded resource paths, and diagnostics.
+immutable snapshots. Activation rereads the exact canonical file, rejects a changed revision, and returns both the
+complete `SKILL.md` contents and its parsed Markdown body, plus the canonical base directory, normalized arguments,
+bounded resource paths, and diagnostics. Product adapters decide which representation enters model context.
 
 The compatible parser performs only recovery recommended by the official client guide, such as a missing-name
 fallback and narrow unquoted-colon repair, and always diagnoses it. Non-standard top-level fields are ignored rather

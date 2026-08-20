@@ -16,6 +16,7 @@ import type {
 	CodingAgentSnapshot,
 	DesiredRuntimeConfiguration,
 	OpenCodingAgentOptions,
+	RunCapabilitySelections,
 	WorkCapacityPolicy,
 	WorkGraphId,
 	WorkItemId,
@@ -211,11 +212,19 @@ export class SessionWorkController {
 		return this.#activeGraphId !== undefined || this.#status !== "idle";
 	}
 
-	async prompt(input: AgentInput, resources: readonly string[] = []): Promise<WorkResult> {
-		return (await this.beginPrompt(input, resources)).result;
+	async prompt(
+		input: AgentInput,
+		resources: readonly string[] = [],
+		capabilitySelections?: RunCapabilitySelections,
+	): Promise<WorkResult> {
+		return (await this.beginPrompt(input, resources, capabilitySelections)).result;
 	}
 
-	async beginPrompt(input: AgentInput, resources: readonly string[] = []): Promise<BegunSessionWork> {
+	async beginPrompt(
+		input: AgentInput,
+		resources: readonly string[] = [],
+		capabilitySelections?: RunCapabilitySelections,
+	): Promise<BegunSessionWork> {
 		this.#assertOpen();
 		if (this.#activeGraphId || this.#operation) throw new Error("This Session already owns active Work");
 		const token = safeIdentity(this.#host.idGenerator.generate("queue_item"));
@@ -243,6 +252,7 @@ export class SessionWorkController {
 					kind: "prompt",
 					input,
 					...(resources.length > 0 ? { resources: Object.freeze([...resources]) } : {}),
+					...(capabilitySelections ? { capabilitySelections } : {}),
 				},
 			],
 		});
@@ -275,7 +285,12 @@ export class SessionWorkController {
 		return Object.freeze({ result: operation });
 	}
 
-	async deliver(kind: "steering" | "follow_up", input: AgentInput, resources: readonly string[] = []): Promise<void> {
+	async deliver(
+		kind: "steering" | "follow_up",
+		input: AgentInput,
+		resources: readonly string[] = [],
+		capabilitySelections?: RunCapabilitySelections,
+	): Promise<void> {
 		this.#assertOpen();
 		const graphId = this.#activeGraphId;
 		const itemId = this.#activeItemId;
@@ -289,6 +304,7 @@ export class SessionWorkController {
 					kind,
 					input,
 					...(resources.length > 0 ? { resources: Object.freeze([...resources]) } : {}),
+					...(capabilitySelections ? { capabilitySelections } : {}),
 				},
 			],
 		});

@@ -115,6 +115,14 @@ function isComposerReferenceToken(text: string, source: "skill" | "mcp", name: s
 	return text === `/${name}` || (source === "skill" && text === `$${name}`);
 }
 
+function isRunCapabilitySelections(value: unknown): boolean {
+	return (
+		isRecord(value) &&
+		Object.keys(value).every((source) => isNonEmptyString(source)) &&
+		Object.values(value).every(isJsonValue)
+	);
+}
+
 function isJsonValue(value: unknown): boolean {
 	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
 	if (typeof value === "number") return Number.isFinite(value);
@@ -529,7 +537,11 @@ function validateSessionRecordPayload(
 				!exactRecord(
 					payload.submission,
 					["id", "kind", "text"],
-					version >= 6 ? ["queueItemId", "references"] : ["queueItemId"],
+					version >= 11
+						? ["queueItemId", "references", "capabilitySelections"]
+						: version >= 6
+							? ["queueItemId", "references"]
+							: ["queueItemId"],
 				)
 			) {
 				return false;
@@ -543,7 +555,10 @@ function validateSessionRecordPayload(
 				payload.submission.text.trim().length > 0 &&
 				(payload.submission.queueItemId === undefined || isNonEmptyString(payload.submission.queueItemId)) &&
 				(payload.submission.references === undefined ||
-					(version >= 6 && isComposerExtensionReferences(payload.submission.references, payload.submission.text)))
+					(version >= 6 &&
+						isComposerExtensionReferences(payload.submission.references, payload.submission.text))) &&
+				(payload.submission.capabilitySelections === undefined ||
+					(version >= 11 && isRunCapabilitySelections(payload.submission.capabilitySelections)))
 			);
 		case "composer_submission_retracted":
 			return version >= 4 && exactRecord(payload, ["id"]) && isNonEmptyString(payload.id);

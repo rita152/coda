@@ -14,10 +14,13 @@ import { createWorkspace, type Workspace } from "../host/workspace.ts";
 import { cleanupSessionMedia } from "../maintenance/session-media.ts";
 import { cleanupTemporaryLogs } from "../maintenance/temporary-logs.ts";
 import type { CodingMcpRegistry } from "../mcp/registry.ts";
-import type { McpAgentElicitation } from "../mcp/run-capability.ts";
+import type { McpAgentElicitation, McpRunExposureDiagnostic } from "../mcp/run-capability.ts";
 import type { MediaLibrary } from "../media/media-library.ts";
+import { createPluginsCapabilitySource } from "../plugins/run-capability.ts";
+import type { CodingPluginsSnapshot } from "../plugins/types.ts";
 import { ProcessSessionManager } from "../process/process-session-manager.ts";
 import type { AgentRunControlBinding, RunControlConfiguration } from "../run-control/index.ts";
+import type { AcquireProjectRunCapabilityBundle } from "../runtime/project-capability-bundle.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import { WorkspaceInputResources } from "../runtime/workspace-input-resources.ts";
 import type {
@@ -303,7 +306,10 @@ export async function openWorkspaceRuntime(input: {
 	readonly disableRunBudget: boolean;
 	readonly maxOutputTokens?: number;
 	readonly skillsManager: CodingSkillsManager;
+	readonly projectCapabilities?: AcquireProjectRunCapabilityBundle;
+	readonly pluginInventory?: (signal: AbortSignal) => CodingPluginsSnapshot | Promise<CodingPluginsSnapshot>;
 	readonly mcpRegistry?: CodingMcpRegistry;
+	readonly mcpDiagnostic?: (diagnostic: McpRunExposureDiagnostic) => void | Promise<void>;
 	readonly projectInstructions?: TrustedProjectInstructions;
 	readonly lifecycleHooks?: LifecycleHookHost;
 }): Promise<OpenedWorkspaceRuntime> {
@@ -322,6 +328,11 @@ export async function openWorkspaceRuntime(input: {
 		workspaceId: input.workspaceId,
 		workspaceRoot: input.workspace.root,
 	});
+	const pluginCapabilitySource = input.projectCapabilities
+		? createPluginsCapabilitySource({ acquireProjectBundle: input.projectCapabilities })
+		: input.pluginInventory
+			? createPluginsCapabilitySource({ acquireInventory: input.pluginInventory })
+			: undefined;
 	const coordinator = input.createWorkCoordinator({
 		workspace: input.workspace,
 		fileSystem: input.options.fileSystem,
@@ -330,7 +341,10 @@ export async function openWorkspaceRuntime(input: {
 		shellExecutable,
 		hostRuntime: input.options.runtime,
 		skillsManager: input.skillsManager,
+		projectCapabilities: input.projectCapabilities,
+		pluginCapabilitySource,
 		mcpRegistry: input.mcpRegistry,
+		mcpDiagnostic: input.mcpDiagnostic,
 		models: input.options.models,
 		clock: input.options.runtime.clock,
 		idGenerator: input.options.runtime.idGenerator,

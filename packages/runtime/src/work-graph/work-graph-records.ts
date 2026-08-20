@@ -242,6 +242,7 @@ export class WorkGraphMirror {
 						kind: input.kind,
 						input: input.input,
 						...(input.resourceReferences.length > 0 ? { resources: input.resourceReferences } : {}),
+						...(input.capabilitySelections ? { capabilitySelections: input.capabilitySelections } : {}),
 					};
 					item.process.inputAdmissions.push({
 						deliveryId: input.deliveryId,

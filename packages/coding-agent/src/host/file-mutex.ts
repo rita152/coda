@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import type { FileSystem, WritableFile } from "./file-system.ts";
 import { isFileSystemError } from "./file-system.ts";
 
@@ -13,6 +13,13 @@ interface FileMutexRecord {
 const RETRY_DELAY_MS = 10;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const INCOMPLETE_RECORD_GRACE_MS = 30_000;
+const RECOVERY_DIRECTORY_NAME = ".coda-file-mutex-recovery-v1";
+const RECOVERY_NAMESPACE_DOMAIN = "coda-file-mutex-recovery-claim-v1";
+
+type FileMutexOwnerInspection =
+	| { readonly state: "missing" }
+	| { readonly state: "busy" }
+	| { readonly state: "recoverable"; readonly suffix: string };
 
 function decodeRecord(source: string): FileMutexRecord {
 	const value: unknown = JSON.parse(source);
@@ -71,6 +78,182 @@ async function retire(fileSystem: FileSystem, path: string, suffix: string): Pro
 	}
 }
 
+function recoveryClaimDirectory(path: string): string {
+	return join(dirname(resolve(path)), RECOVERY_DIRECTORY_NAME);
+}
+
+function recoveryClaimPrefix(path: string): string {
+	const digest = createHash("sha256")
+		.update(RECOVERY_NAMESPACE_DOMAIN)
+		.update("\0")
+		.update(resolve(path))
+		.digest("hex");
+	return `${digest}.`;
+}
+
+function recoveryClaimPath(path: string, record: FileMutexRecord): string {
+	return join(recoveryClaimDirectory(path), `${recoveryClaimPrefix(path)}${String(record.pid)}.${record.token}`);
+}
+
+async function resolveRecoveryClaimDirectory(
+	fileSystem: FileSystem,
+	path: string,
+	create: boolean,
+): Promise<string | undefined> {
+	const directory = recoveryClaimDirectory(path);
+	if (create) await fileSystem.makeDirectory(directory, { recursive: true, mode: 0o700 });
+	const status = await fileSystem.lstat(directory).catch((error: unknown) => {
+		if (isFileSystemError(error, "ENOENT")) return undefined;
+		throw error;
+	});
+	if (!status) return undefined;
+	if (status.kind !== "directory") {
+		throw new Error(`File mutex recovery directory must be a regular directory: ${directory}`);
+	}
+	return directory;
+}
+
+async function inspectOwner(fileSystem: FileSystem, path: string): Promise<FileMutexOwnerInspection> {
+	const status = await fileSystem.lstat(path).catch((error: unknown) => {
+		if (isFileSystemError(error, "ENOENT")) return undefined;
+		throw error;
+	});
+	if (!status) return { state: "missing" };
+	if (status.kind !== "file") throw new Error(`File mutex path must be a regular file: ${path}`);
+	let record: FileMutexRecord;
+	try {
+		record = decodeRecord(new TextDecoder().decode(await fileSystem.readFile(path)));
+	} catch (error) {
+		if (isFileSystemError(error, "ENOENT")) return { state: "missing" };
+		if (Date.now() - status.modifiedAt >= INCOMPLETE_RECORD_GRACE_MS) {
+			return { state: "recoverable", suffix: "incomplete" };
+		}
+		return { state: "busy" };
+	}
+	if (!processIsAlive(record.pid)) return { state: "recoverable", suffix: record.token };
+	return { state: "busy" };
+}
+
+async function hasActiveRecoveryClaim(fileSystem: FileSystem, path: string): Promise<boolean> {
+	const prefix = recoveryClaimPrefix(path);
+	const directory = await resolveRecoveryClaimDirectory(fileSystem, path, false);
+	if (!directory) return false;
+	const entries = [...(await fileSystem.readDirectory(directory))].sort((left, right) =>
+		left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+	);
+	let active = false;
+	for (const entry of entries) {
+		if (!entry.name.startsWith(prefix)) continue;
+		const claimPath = join(directory, entry.name);
+		const status = await fileSystem.lstat(claimPath).catch((error: unknown) => {
+			if (isFileSystemError(error, "ENOENT")) return undefined;
+			throw error;
+		});
+		if (!status) continue;
+		if (status.kind !== "file") {
+			throw new Error(`File mutex recovery claim must be a regular file: ${claimPath}`);
+		}
+		let record: FileMutexRecord;
+		try {
+			record = decodeRecord(new TextDecoder().decode(await fileSystem.readFile(claimPath)));
+			if (recoveryClaimPath(path, record) !== claimPath) throw new Error("Invalid file mutex recovery claim");
+		} catch (error) {
+			if (isFileSystemError(error, "ENOENT")) continue;
+			if (Date.now() - status.modifiedAt >= INCOMPLETE_RECORD_GRACE_MS) {
+				await retire(fileSystem, claimPath, "incomplete-recovery");
+				continue;
+			}
+			active = true;
+			continue;
+		}
+		if (processIsAlive(record.pid)) {
+			active = true;
+			continue;
+		}
+		await retire(fileSystem, claimPath, "exited-recovery");
+	}
+	return active;
+}
+
+async function removeOwnedRecord(
+	fileSystem: FileSystem,
+	path: string,
+	record: FileMutexRecord,
+	options: { readonly allowMissing: boolean },
+): Promise<boolean> {
+	let current: FileMutexRecord;
+	try {
+		current = decodeRecord(new TextDecoder().decode(await fileSystem.readFile(path)));
+	} catch (error) {
+		if (options.allowMissing && isFileSystemError(error, "ENOENT")) return false;
+		throw error;
+	}
+	if (current.token !== record.token || current.pid !== record.pid) {
+		throw new Error(`File mutex ownership changed: ${path}`);
+	}
+	await fileSystem.removeFile(path);
+	return true;
+}
+
+async function publishRecord(fileSystem: FileSystem, path: string, record: FileMutexRecord): Promise<void> {
+	let handle: WritableFile | undefined;
+	try {
+		handle = await fileSystem.open(path, "wx", 0o600);
+		await handle.write(`${JSON.stringify(record)}\n`);
+		await handle.sync();
+		await handle.close();
+		handle = undefined;
+	} catch (error) {
+		await handle?.close().catch(() => undefined);
+		await removeOwnedRecord(fileSystem, path, record, { allowMissing: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
+async function withRecoveryClaim<Result>(options: {
+	readonly fileSystem: FileSystem;
+	readonly path: string;
+	readonly operation: () => Promise<Result>;
+}): Promise<Result> {
+	const record: FileMutexRecord = {
+		version: 1,
+		token: randomUUID(),
+		pid: process.pid,
+		acquiredAt: Date.now(),
+	};
+	const path = recoveryClaimPath(options.path, record);
+	await resolveRecoveryClaimDirectory(options.fileSystem, options.path, true);
+	await publishRecord(options.fileSystem, path, record);
+	const settlement = await options.operation().then(
+		(value) => ({ state: "fulfilled" as const, value }),
+		(error: unknown) => ({ state: "rejected" as const, error }),
+	);
+	let releaseFailure: unknown;
+	try {
+		await removeOwnedRecord(options.fileSystem, path, record, { allowMissing: false });
+	} catch (error) {
+		releaseFailure = error;
+	}
+	if (settlement.state === "rejected") {
+		if (releaseFailure) throw new AggregateError([settlement.error, releaseFailure], "File mutex recovery failed");
+		throw settlement.error;
+	}
+	if (releaseFailure) throw releaseFailure;
+	return settlement.value;
+}
+
+async function recoverOwner(fileSystem: FileSystem, path: string, signal?: AbortSignal): Promise<void> {
+	await withRecoveryClaim({
+		fileSystem,
+		path,
+		operation: async () => {
+			signal?.throwIfAborted();
+			const current = await inspectOwner(fileSystem, path);
+			if (current.state === "recoverable") await retire(fileSystem, path, current.suffix);
+		},
+	});
+}
+
 export async function withFileMutex<Result>(options: {
 	readonly fileSystem: FileSystem;
 	readonly path: string;
@@ -81,29 +264,28 @@ export async function withFileMutex<Result>(options: {
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const startedAt = Date.now();
 	const token = randomUUID();
+	const record: FileMutexRecord = { version: 1, token, pid: process.pid, acquiredAt: Date.now() };
 	await options.fileSystem.makeDirectory(dirname(options.path), { recursive: true, mode: 0o700 });
 	for (;;) {
 		if (options.signal?.aborted) {
 			throw options.signal.reason ?? new DOMException("Aborted", "AbortError");
+		}
+		if (await hasActiveRecoveryClaim(options.fileSystem, options.path)) {
+			if (Date.now() - startedAt >= timeoutMs) {
+				throw new Error(`Timed out acquiring file mutex: ${options.path}`);
+			}
+			await wait(RETRY_DELAY_MS, options.signal);
+			continue;
 		}
 		let handle: WritableFile;
 		try {
 			handle = await options.fileSystem.open(options.path, "wx", 0o600);
 		} catch (error) {
 			if (!isFileSystemError(error, "EEXIST")) throw error;
-			let record: FileMutexRecord | undefined;
-			try {
-				record = decodeRecord(new TextDecoder().decode(await options.fileSystem.readFile(options.path)));
-			} catch (readError) {
-				if (isFileSystemError(readError, "ENOENT")) continue;
-				const status = await options.fileSystem.lstat(options.path).catch(() => undefined);
-				if (status && Date.now() - status.modifiedAt >= INCOMPLETE_RECORD_GRACE_MS) {
-					await retire(options.fileSystem, options.path, "incomplete");
-					continue;
-				}
-			}
-			if (record && !processIsAlive(record.pid)) {
-				await retire(options.fileSystem, options.path, record.token);
+			const current = await inspectOwner(options.fileSystem, options.path);
+			if (current.state === "missing") continue;
+			if (current.state === "recoverable") {
+				await recoverOwner(options.fileSystem, options.path, options.signal);
 				continue;
 			}
 			if (Date.now() - startedAt >= timeoutMs) {
@@ -112,14 +294,34 @@ export async function withFileMutex<Result>(options: {
 			await wait(RETRY_DELAY_MS, options.signal);
 			continue;
 		}
-		const record: FileMutexRecord = { version: 1, token, pid: process.pid, acquiredAt: Date.now() };
 		try {
 			await handle.write(`${JSON.stringify(record)}\n`);
+			await handle.sync();
 			await handle.close();
 		} catch (error) {
 			await handle.close().catch(() => undefined);
-			await options.fileSystem.removeFile(options.path).catch(() => undefined);
+			await removeOwnedRecord(options.fileSystem, options.path, record, { allowMissing: true }).catch(
+				() => undefined,
+			);
 			throw error;
+		}
+		let ownsPublishedRecord = false;
+		try {
+			const current = decodeRecord(new TextDecoder().decode(await options.fileSystem.readFile(options.path)));
+			ownsPublishedRecord = current.token === token && current.pid === process.pid;
+		} catch (error) {
+			if (!isFileSystemError(error, "ENOENT")) throw error;
+		}
+		const recoveryActive = await hasActiveRecoveryClaim(options.fileSystem, options.path);
+		if (!ownsPublishedRecord || recoveryActive) {
+			if (ownsPublishedRecord) {
+				await removeOwnedRecord(options.fileSystem, options.path, record, { allowMissing: true });
+			}
+			if (Date.now() - startedAt >= timeoutMs) {
+				throw new Error(`Timed out acquiring file mutex: ${options.path}`);
+			}
+			await wait(RETRY_DELAY_MS, options.signal);
+			continue;
 		}
 		break;
 	}
@@ -130,9 +332,7 @@ export async function withFileMutex<Result>(options: {
 	);
 	let releaseFailure: unknown;
 	try {
-		const current = decodeRecord(new TextDecoder().decode(await options.fileSystem.readFile(options.path)));
-		if (current.token !== token) throw new Error(`File mutex ownership changed: ${options.path}`);
-		await options.fileSystem.removeFile(options.path);
+		await removeOwnedRecord(options.fileSystem, options.path, record, { allowMissing: false });
 	} catch (error) {
 		if (!isFileSystemError(error, "ENOENT")) releaseFailure = error;
 	}

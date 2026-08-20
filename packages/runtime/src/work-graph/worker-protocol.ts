@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentInput, SessionEvent } from "@coda/agent";
-import type { WorkGraphId, WorkItemEvent, WorkItemId } from "./types.ts";
+import type { RunCapabilitySelections, WorkGraphId, WorkItemEvent, WorkItemId } from "./types.ts";
 import type { OpenAttemptEffect, OpenToolEffect, WorkerFact } from "./worker-fact.ts";
 
 /** Host-only input envelope. It is never appended to the model-visible transcript as metadata. */
@@ -10,6 +10,7 @@ export interface WorkerSubmission {
 	readonly kind: "prompt" | "steering" | "follow_up";
 	readonly input: AgentInput;
 	readonly resourceReferences: readonly string[];
+	readonly capabilitySelections?: RunCapabilitySelections;
 }
 
 type AgentEventOf<TType extends AgentEvent["type"]> = Extract<AgentEvent, { readonly type: TType }>;

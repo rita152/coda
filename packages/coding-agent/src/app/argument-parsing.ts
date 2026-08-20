@@ -9,6 +9,7 @@ import { REASONING_EFFORTS } from "../models/reasoning-effort.ts";
 import type { RunControlConfiguration } from "../run-control/index.ts";
 import { isApprovalPolicy } from "./approval-sandbox.ts";
 import type { JsonEventStreamMode } from "./json-event-writer.ts";
+import { type PluginCommandArguments, parsePluginCommandArguments } from "./plugin-arguments.ts";
 
 const DEFAULT_CODING_AGENT_RUN_BUDGET: RunBudget = Object.freeze({
 	limits: Object.freeze({
@@ -28,7 +29,7 @@ export function codingAgentRunBudget(maxTurns: number | undefined, disabled: boo
 }
 
 export interface ParsedArguments {
-	readonly action: "cleanup" | "help" | "run" | "sessions" | "skills-validate" | "version";
+	readonly action: "cleanup" | "help" | "plugin" | "run" | "sessions" | "skills-validate" | "version";
 	readonly mode: "interactive" | "print";
 	readonly output: "json" | "text";
 	readonly jsonEventStream: JsonEventStreamMode;
@@ -62,6 +63,7 @@ export interface ParsedArguments {
 	readonly prompt: string;
 	readonly imagePaths: readonly string[];
 	readonly skillsPath?: string;
+	readonly plugin?: PluginCommandArguments;
 }
 
 function parseModel(value: string): ModelSelection {
@@ -108,6 +110,7 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 	const promptParts: string[] = [];
 	const imagePaths: string[] = [];
 	let skillsPath: string | undefined;
+	let plugin: PluginCommandArguments | undefined;
 
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index]!;
@@ -120,6 +123,11 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 			action = "skills-validate";
 			index++;
 			continue;
+		}
+		if (action === "run" && argument === "plugin" && promptParts.length === 0) {
+			action = "plugin";
+			plugin = parsePluginCommandArguments(args.slice(index + 1));
+			break;
 		}
 		if (argument === "--print" || argument === "-p" || argument === "--no-tui") {
 			if (explicitMode === "interactive") throw new Error("--print and --interactive cannot be combined");
@@ -406,6 +414,7 @@ export async function parseArguments(args: readonly string[], io: ApplicationIO)
 		prompt,
 		imagePaths: Object.freeze([...imagePaths]),
 		...(skillsPath ? { skillsPath } : {}),
+		...(plugin ? { plugin } : {}),
 	};
 }
 
@@ -473,6 +482,7 @@ Commands:
   sessions                       List Sessions for the selected Workspace
   cleanup                        Remove expired, unreferenced temporary logs
   skills validate <path>         Strictly validate one Agent Skill without starting a Session
+  plugin <command>               Manage Agent Plugins and Plugin Marketplaces
 
 Other:
   -h, --help                     Show this help

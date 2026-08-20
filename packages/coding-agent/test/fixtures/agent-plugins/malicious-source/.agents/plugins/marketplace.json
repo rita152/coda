@@ -1,0 +1,9 @@
+{
+  "name": "fixture-malicious-source",
+  "plugins": [
+    {
+      "name": "fixture-escape",
+      "source": "../../outside"
+    }
+  ]
+}

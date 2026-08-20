@@ -33,6 +33,8 @@ export interface FileSystem {
 	rename(from: string, to: string): Promise<void>;
 	removeFile(path: string): Promise<void>;
 	removeDirectory(path: string): Promise<void>;
+	/** Removes one filesystem entry and, for directories, its contents without exposing descendant reads. */
+	removeTree(path: string): Promise<void>;
 	setMode(path: string, mode: number): Promise<void>;
 }
 

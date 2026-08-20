@@ -19,11 +19,15 @@ export function resolveRunMentions(options: {
 	const structured = options.references ?? [];
 	const mcpTools = options.mcpTools ?? [];
 	const skillReferences: SkillComposerReference[] = [];
+	const selectedSkillIds = new Set<string>();
 	const mcpToolIds = new Set<string>();
 
 	for (const reference of structured) {
 		if (reference.source === "skill") {
-			skillReferences.push(reference);
+			if (!selectedSkillIds.has(reference.commandId)) {
+				selectedSkillIds.add(reference.commandId);
+				skillReferences.push(reference);
+			}
 			continue;
 		}
 		if (reference.source === "mcp") {
@@ -36,21 +40,25 @@ export function resolveRunMentions(options: {
 	const indexes = mentionIndexes(options.skills, mcpTools);
 	for (const mention of extractDollarMentions(options.composerText)) {
 		if (overlaps(mention.start, mention.end, structured)) continue;
-		const skill = indexes.skills.get(mention.name);
+		const skill = indexes.skills.get(normalizeMentionName(mention.name));
 		if (skill) {
-			skillReferences.push(
-				Object.freeze({
-					id: `text-mention:${mention.start}:${skill.candidate.id}`,
-					commandId: String(skill.candidate.id),
-					source: "skill" as const,
-					name: mention.name,
-					start: mention.start,
-					end: mention.end,
-				}),
-			);
+			const commandId = String(skill.candidate.id);
+			if (!selectedSkillIds.has(commandId)) {
+				selectedSkillIds.add(commandId);
+				skillReferences.push(
+					Object.freeze({
+						id: `text-mention:${mention.start}:${skill.candidate.id}`,
+						commandId,
+						source: "skill" as const,
+						name: mention.name,
+						start: mention.start,
+						end: mention.end,
+					}),
+				);
+			}
 			continue;
 		}
-		const tools = indexes.mcp.get(mention.name);
+		const tools = indexes.mcpExact.get(mention.name) ?? indexes.mcp.get(normalizeMentionName(mention.name));
 		if (!tools) continue;
 		for (const tool of tools) mcpToolIds.add(tool.id);
 	}
@@ -71,30 +79,50 @@ function mentionIndexes(
 ): {
 	readonly skills: ReadonlyMap<string, (typeof skills.resolved)[number]>;
 	readonly mcp: ReadonlyMap<string, readonly McpToolDescriptor[]>;
+	readonly mcpExact: ReadonlyMap<string, readonly McpToolDescriptor[]>;
 } {
 	const skillNames = new Map<string, (typeof skills.resolved)[number]>();
 	addUnique(
 		skillNames,
-		skills.resolved.filter((entry) => entry.winner),
-		(entry) => entry.candidate.metadata.name,
+		skills.resolved.filter((entry) => entry.winner && entry.origin.kind === "direct"),
+		(entry) => normalizeMentionName(entry.candidate.metadata.name),
 	);
-	addUnique(skillNames, skills.resolved, (entry) => entry.qualifiedName);
+	addUnique(skillNames, skills.resolved, (entry) => normalizeMentionName(entry.qualifiedName));
 
 	const mcp = new Map<string, readonly McpToolDescriptor[]>();
+	const mcpExact = new Map<string, readonly McpToolDescriptor[]>();
 	const byServer = new Map<string, McpToolDescriptor[]>();
 	for (const tool of mcpTools) {
-		const group = byServer.get(tool.serverId) ?? [];
+		const group = byServer.get(tool.serverSemanticName) ?? [];
 		group.push(tool);
-		byServer.set(tool.serverId, group);
+		byServer.set(tool.serverSemanticName, group);
 	}
-	for (const [serverId, tools] of byServer) {
-		if (!skillNames.has(serverId) && !mcp.has(serverId)) mcp.set(serverId, Object.freeze(tools));
+	const foldedServerNames = new Map<string, string[]>();
+	for (const [serverSemanticName, tools] of byServer) {
+		const key = normalizeMentionName(serverSemanticName);
+		if (skillNames.has(key)) continue;
+		mcpExact.set(serverSemanticName, Object.freeze(tools));
+		const names = foldedServerNames.get(key) ?? [];
+		names.push(serverSemanticName);
+		foldedServerNames.set(key, names);
 	}
-	addUniqueTools(mcp, skillNames, mcpTools, (tool) => tool.remoteName);
-	addUniqueTools(mcp, skillNames, mcpTools, (tool) => `${tool.serverId}-${tool.remoteName}`);
-	addUniqueTools(mcp, skillNames, mcpTools, (tool) => `${tool.serverId}:${tool.remoteName}`);
-	addUniqueTools(mcp, skillNames, mcpTools, (tool) => tool.name);
-	return { skills: skillNames, mcp };
+	for (const [key, names] of foldedServerNames) {
+		if (names.length !== 1 || mcp.has(key)) continue;
+		mcp.set(key, mcpExact.get(names[0]!)!);
+	}
+	addUniqueTools(mcp, skillNames, mcpTools, (tool) => normalizeMentionName(tool.remoteName));
+	addUniqueTools(mcp, skillNames, mcpTools, (tool) =>
+		normalizeMentionName(`${tool.serverSemanticName}-${tool.remoteName}`),
+	);
+	addUniqueTools(mcp, skillNames, mcpTools, (tool) =>
+		normalizeMentionName(`${tool.serverSemanticName}:${tool.remoteName}`),
+	);
+	addUniqueTools(mcp, skillNames, mcpTools, (tool) => normalizeMentionName(tool.name));
+	return { skills: skillNames, mcp, mcpExact };
+}
+
+function normalizeMentionName(value: string): string {
+	return value.normalize("NFKC").toLowerCase();
 }
 
 function addUnique<T>(target: Map<string, T>, items: readonly T[], key: (item: T) => string): void {

@@ -3,6 +3,7 @@ import type { JsonValue } from "@coda/ai";
 import type {
 	DesiredRuntimeConfiguration,
 	PublicationOutcome,
+	RunCapabilitySelections,
 	WorkDiagnostic,
 	WorkExecutionMode,
 	WorkGraphId,
@@ -71,6 +72,7 @@ export type WorkGraphFact =
 			readonly kind: WorkItemInputKind;
 			readonly input: AgentInput;
 			readonly resourceReferences: readonly string[];
+			readonly capabilitySelections?: RunCapabilitySelections;
 	  })
 	| (WorkGraphFactBase & {
 			readonly type: "input_resources_settled";
@@ -165,6 +167,7 @@ const FACT_KEYS = {
 		"kind",
 		"input",
 		"resourceReferences",
+		"capabilitySelections",
 	],
 	input_resources_settled: [
 		"version",
@@ -202,7 +205,7 @@ const FACT_KEYS = {
 const OPTIONAL_FACT_KEYS = {
 	graph_accepted: [],
 	items_accepted: [],
-	input_accepted: [],
+	input_accepted: ["capabilitySelections"],
 	input_resources_settled: ["diagnostic"],
 	item_configuration_changed: [],
 	item_transitioned: [],
@@ -606,6 +609,10 @@ export function assertWorkGraphFact(value: unknown): asserts value is WorkGraphF
 			}
 			for (const reference of value.resourceReferences) {
 				assertText(reference, "resourceReferences[]", type, MAXIMUM_REFERENCE_LENGTH);
+			}
+			if (value.capabilitySelections !== undefined) {
+				if (!isRecord(value.capabilitySelections)) invalid(type, "capabilitySelections must be an object");
+				assertJsonCompatible(value.capabilitySelections, type, "capabilitySelections");
 			}
 			return;
 		case "input_resources_settled":

@@ -18,6 +18,7 @@ import { ContextOverflowRecovery } from "../context-window/overflow-recovery.ts"
 import type { LifecycleHookHost, LifecycleHookTurnContext } from "../lifecycle-hooks.ts";
 import { createCodingAgentRetry } from "../retry.ts";
 import type { RunCapabilityHost, RunCapabilityLease, RunToolContribution } from "../run-capabilities.ts";
+import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
 import type {
 	Identity,
 	RunModelProvider,
@@ -27,7 +28,14 @@ import type {
 	WorkspacePlacementReservation,
 	WorkspaceTooling,
 } from "./ports.ts";
-import type { DesiredRuntimeConfiguration, WorkExecutionMode, WorkGraphId, WorkItemId } from "./types.ts";
+import type {
+	DesiredRuntimeConfiguration,
+	RunCapabilitySelections,
+	WorkExecutionMode,
+	WorkGraphId,
+	WorkItemId,
+	WorkResult,
+} from "./types.ts";
 import { routeWorkerEvent } from "./worker-event-router.ts";
 import {
 	INITIAL_WORKER_FACT_PROJECTION,
@@ -257,6 +265,11 @@ export async function openPrivateWorkerRuntime(request: {
 	readonly session: WorkSessionReservation;
 	readonly placement: WorkspacePlacementReservation;
 	readonly coordinatorTools?: readonly AgentTool[];
+	readonly delegate?: (
+		specifications: readonly DelegateChildSpecification[],
+		context: ToolExecutionContext,
+		capabilitySelections: RunCapabilitySelections | undefined,
+	) => Promise<readonly WorkResult[]>;
 	readonly commitFact: (fact: WorkerFact, runtimeId: string, sessionId: string) => Promise<WorkerFactProjection>;
 	readonly publishObservation: (observation: WorkerObservation, runtimeId: string, sessionId: string) => void;
 	readonly resynchronizeObservations: (runtimeId: string, sessionId: string) => void;
@@ -268,6 +281,7 @@ export async function openPrivateWorkerRuntime(request: {
 	if (request.signal.aborted) throw aborted(request.signal);
 	request.assertProgressAllowed();
 	const sessionId = String(request.session.session.id);
+	const capabilitySelectionsByRunId = new Map<string, RunCapabilitySelections>();
 	const contributions = await awaitPreparation(
 		options.tooling.tools({
 			graphId: request.graphId,
@@ -289,6 +303,21 @@ export async function openPrivateWorkerRuntime(request: {
 	const baseTools: readonly RunToolContribution[] = Object.freeze([
 		...contributions,
 		...(request.coordinatorTools ?? []).map((tool) => Object.freeze({ tool, effect: "read" as const })),
+		...(request.delegate
+			? [
+					Object.freeze({
+						tool: createDelegateTool({
+							execute: (specifications, context) =>
+								request.delegate!(
+									specifications,
+									context,
+									capabilitySelectionsByRunId.get(String(context.runId)),
+								),
+						}),
+						effect: "read" as const,
+					}),
+				]
+			: []),
 	]);
 	const lifecycleContext = (turnId: string): LifecycleHookTurnContext => ({
 		sessionId,
@@ -419,8 +448,12 @@ export async function openPrivateWorkerRuntime(request: {
 		prepareRun: async (preparation): Promise<PreparedRun> => {
 			request.assertProgressAllowed();
 			const submission = submissionFor(preparation);
+			const runId = String(preparation.runId);
+			if (submission.capabilitySelections) {
+				capabilitySelectionsByRunId.set(runId, submission.capabilitySelections);
+			}
 			const configuration = desired;
-			activeHookTurnId = String(preparation.runId);
+			activeHookTurnId = runId;
 			const deadline = preparationDeadline(preparation, configuration.desired, options);
 			observations.publishPreparation({
 				type: "preparation_started",
@@ -446,6 +479,7 @@ export async function openPrivateWorkerRuntime(request: {
 					mode: request.mode,
 					baseTools,
 					bindTools,
+					...(submission.capabilitySelections ? { capabilitySelections: submission.capabilitySelections } : {}),
 					signal: preparation.signal,
 					...(deadline === undefined ? {} : { deadline }),
 				});
@@ -503,6 +537,7 @@ export async function openPrivateWorkerRuntime(request: {
 					dispose: () => {
 						if (disposeOperation) return disposeOperation;
 						disposeOperation = capabilities!.dispose().finally(() => {
+							capabilitySelectionsByRunId.delete(runId);
 							if (activeCapabilities === capabilities) activeCapabilities = undefined;
 							if (preparation.queueItemId) followUps.delete(preparation.queueItemId);
 							if (activeHookTurnId === String(preparation.runId)) activeHookTurnId = undefined;
@@ -516,6 +551,7 @@ export async function openPrivateWorkerRuntime(request: {
 				};
 				return Object.freeze(preparedRun);
 			} catch (error) {
+				capabilitySelectionsByRunId.delete(runId);
 				if (capabilities) {
 					try {
 						await capabilities.dispose();

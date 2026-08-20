@@ -100,6 +100,7 @@ function codecFacts(): readonly WorkGraphFact[] {
 				{ type: "skill", name: "design", path: "/skills/design/SKILL.md" },
 			],
 			resourceReferences: ["resource:1"],
+			capabilitySelections: { mcp: { toolIds: ["mcp:docs:search"] } },
 		},
 		{
 			version: 1,

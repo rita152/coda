@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { Clock, IdGenerator } from "@coda/agent";
 import type { Api, AuthResult, Model, MutableModels, ThinkingLevel } from "@coda/ai";
-import type { McpElicitationResult } from "@coda/mcp";
+import type { McpElicitationResult, McpHostSnapshot } from "@coda/mcp";
 import type { Scheduler } from "@coda/tui";
 import type { ModelCommandEntry } from "../commands/model-flow.ts";
 import type { FileSystem } from "../host/file-system.ts";
@@ -35,7 +35,7 @@ import {
 	type RestoredChatMedia,
 	restoredChatAttachments,
 } from "./media-attachments.ts";
-import { prepareUserPrompt } from "./prepare-user-prompt.ts";
+import { type PrepareExplicitSkillMcpDependencies, prepareUserPrompt } from "./prepare-user-prompt.ts";
 import { createSessionPresentation } from "./session-presentation.ts";
 import { assertExtensionReferencesAvailable } from "./trust-gating.ts";
 
@@ -142,12 +142,19 @@ export interface CreateInteractiveSessionOptionsInput {
 	readonly listModelEntries: () => Promise<readonly ModelCommandEntry[]>;
 	readonly authCommand: NonNullable<InteractiveSessionOptions["authCommand"]>;
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
+	readonly pluginsCommand: NonNullable<InteractiveSessionOptions["pluginsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
 	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
 	readonly permissionsCommand: NonNullable<InteractiveSessionOptions["permissionsCommand"]>;
 	readonly skillsManager: CodingSkillsManager;
 	readonly skillsSnapshot: CodingSkillsSnapshot;
 	readonly mcpRegistry?: CodingMcpRegistry;
+	readonly projectCapabilityCatalog?: () => {
+		readonly revision: string;
+		readonly skills: CodingSkillsSnapshot;
+		readonly mcp: McpHostSnapshot;
+	};
+	readonly prepareSkillMcpDependencies: PrepareExplicitSkillMcpDependencies;
 	readonly inputResources: WorkspaceInputResources;
 	readonly options: InteractiveSessionApplicationOptions;
 	readonly workspace: string;
@@ -177,12 +184,13 @@ export function createInteractiveSessionOptions(
 		effortCommand: createEffortCommand(input.session, input.work),
 		authCommand: input.authCommand,
 		skillsCommand: input.skillsCommand,
+		pluginsCommand: input.pluginsCommand,
 		mcpCommand: input.mcpCommand,
 		hooksCommand: input.hooksCommand,
 		permissionsCommand: input.permissionsCommand,
 		reasoning: input.reasoning,
 		restoredAttachments: input.restoredMedia.attachments,
-		resolveExtensionReferences: createExtensionReferenceResolver(input.skillsManager, input.mcpRegistry),
+		resolveExtensionReferences: createExtensionReferenceResolver(input),
 		buildPrompt: createPromptBuilder(input),
 		prepareAttachments,
 		...mediaHandlers,
@@ -272,25 +280,34 @@ function selectedModelAuth(
 }
 
 function createExtensionReferenceResolver(
-	skillsManager: CodingSkillsManager,
-	mcpRegistry: CodingMcpRegistry | undefined,
+	input: Pick<CreateInteractiveSessionOptionsInput, "skillsManager" | "mcpRegistry" | "projectCapabilityCatalog">,
 ): NonNullable<InteractiveSessionOptions["resolveExtensionReferences"]> {
 	return async (references) => {
-		const snapshot = await skillsManager.refresh({ rescan: false });
-		assertExtensionReferencesAvailable(snapshot, mcpRegistry?.snapshot().tools ?? [], references);
+		const project = input.projectCapabilityCatalog?.();
+		const skills = project?.skills ?? (await input.skillsManager.refresh({ rescan: false }));
+		const mcpTools = project?.mcp.tools ?? input.mcpRegistry?.snapshot().tools ?? [];
+		assertExtensionReferencesAvailable(skills, mcpTools, references);
 	};
 }
 
 function createPromptBuilder(
 	input: Pick<
 		CreateInteractiveSessionOptionsInput,
-		"work" | "mediaLibrary" | "restoredMedia" | "skillsManager" | "skillsSnapshot" | "mcpRegistry"
+		| "work"
+		| "mediaLibrary"
+		| "restoredMedia"
+		| "skillsManager"
+		| "skillsSnapshot"
+		| "mcpRegistry"
+		| "projectCapabilityCatalog"
+		| "prepareSkillMcpDependencies"
 	>,
 ): NonNullable<InteractiveSessionOptions["buildPrompt"]> {
 	return async (text, attachmentIds, inputContext) => {
 		const selectedModel = input.work.state().selection.model;
 		assertModelSupportsImages(selectedModel, attachmentIds.length);
-		const snapshot = input.skillsManager.current ?? input.skillsSnapshot;
+		const project = input.projectCapabilityCatalog?.();
+		const snapshot = project?.skills ?? input.skillsManager.current ?? input.skillsSnapshot;
 		return prepareUserPrompt({
 			text,
 			composerText: inputContext.composerText,
@@ -299,7 +316,9 @@ function createPromptBuilder(
 			mediaLibrary: input.mediaLibrary,
 			restoredContents: input.restoredMedia.contents,
 			skills: snapshot,
-			...(input.mcpRegistry ? { mcpRegistry: input.mcpRegistry } : {}),
+			...(project ? { projectRevision: project.revision } : {}),
+			...(project ? { mcpTools: project.mcp.tools } : input.mcpRegistry ? { mcpRegistry: input.mcpRegistry } : {}),
+			prepareSkillMcpDependencies: input.prepareSkillMcpDependencies,
 		});
 	};
 }

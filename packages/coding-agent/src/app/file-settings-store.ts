@@ -4,6 +4,7 @@ import type { IdGenerator } from "@coda/agent";
 import type { ThinkingLevel } from "@coda/ai";
 import { APPROVAL_POLICIES, type ApprovalPolicy, type RememberedCommandPermission } from "@coda/permission";
 import { SANDBOX_MODES, type SandboxMode } from "@coda/sandbox";
+import { withFileMutex } from "../host/file-mutex.ts";
 import type { FileSystem, WritableFile } from "../host/file-system.ts";
 import { isFileSystemError } from "../host/file-system.ts";
 import { parseMcpServerConfigurations } from "../mcp/config.ts";
@@ -78,6 +79,7 @@ function validateSettings(value: unknown): UserSettings {
 			"version",
 			"defaultModel",
 			"defaultReasoning",
+			"plugins",
 			"customProviders",
 			"projectTrust",
 			"mcpServers",
@@ -114,6 +116,30 @@ function validateSettings(value: unknown): UserSettings {
 			throw new Error("Coda settings contain an invalid default reasoning level");
 		}
 		defaultReasoning = value.defaultReasoning as ThinkingLevel | "off";
+	}
+	let plugins: UserSettings["plugins"];
+	if (value.plugins !== undefined) {
+		if (!isRecord(value.plugins)) throw new Error("Coda settings contain invalid Plugin settings");
+		const entries = Object.entries(value.plugins).sort(([left], [right]) => compareText(left, right));
+		const normalized: [string, { readonly enabled: boolean }][] = [];
+		for (const [pluginId, entry] of entries) {
+			const separator = pluginId.lastIndexOf("@");
+			const pluginName = pluginId.slice(0, separator);
+			const source = pluginId.slice(separator + 1);
+			if (
+				separator <= 0 ||
+				pluginName.length > 64 ||
+				!/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(pluginName) ||
+				!/^[A-Za-z0-9_-]+$/u.test(source) ||
+				!isRecord(entry) ||
+				!hasOnlyKeys(entry, ["enabled"]) ||
+				typeof entry.enabled !== "boolean"
+			) {
+				throw new Error("Coda settings contain invalid Plugin settings");
+			}
+			normalized.push([pluginId, { enabled: entry.enabled }]);
+		}
+		plugins = Object.fromEntries(normalized);
 	}
 	let customProviders: UserSettings["customProviders"];
 	if (value.customProviders !== undefined) {
@@ -424,6 +450,7 @@ function validateSettings(value: unknown): UserSettings {
 	return {
 		...(defaultModel ? { defaultModel } : {}),
 		...(defaultReasoning ? { defaultReasoning } : {}),
+		...(plugins ? { plugins } : {}),
 		...(customProviders ? { customProviders } : {}),
 		...(projectTrust ? { projectTrust } : {}),
 		...(mcpServers ? { mcpServers } : {}),
@@ -501,9 +528,41 @@ export class FileSettingsStore implements SettingsStore {
 
 	async save(settings: UserSettings): Promise<void> {
 		const snapshot = settingsFile(settings);
-		const operation = this.#tail.catch(() => undefined).then(() => this.#write(snapshot));
+		const operation = this.#tail
+			.catch(() => undefined)
+			.then(() =>
+				withFileMutex({
+					fileSystem: this.#fileSystem,
+					path: join(this.#directory, "settings.v1.lock"),
+					operation: () => this.#write(snapshot),
+				}),
+			);
 		this.#tail = operation;
 		await operation;
+	}
+
+	async update(mutator: (settings: UserSettings) => UserSettings): Promise<UserSettings> {
+		const operation = this.#tail
+			.catch(() => undefined)
+			.then(() =>
+				withFileMutex({
+					fileSystem: this.#fileSystem,
+					path: join(this.#directory, "settings.v1.lock"),
+					operation: async () => {
+						const current = await this.load();
+						const candidate = mutator(current);
+						const next = validateSettings(settingsFile(candidate));
+						if (candidate === current) return current;
+						await this.#write(settingsFile(next));
+						return next;
+					},
+				}),
+			);
+		this.#tail = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		return operation;
 	}
 
 	async #write(settings: SettingsFile): Promise<void> {
@@ -523,7 +582,6 @@ export class FileSettingsStore implements SettingsStore {
 			await this.#fileSystem.setMode(temporaryPath, 0o600);
 			await this.#fileSystem.rename(temporaryPath, this.#path);
 			committed = true;
-			await this.#fileSystem.setMode(this.#path, 0o600);
 		} finally {
 			await handle?.close().catch(() => undefined);
 			if (!committed) {

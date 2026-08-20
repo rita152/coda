@@ -45,6 +45,7 @@ describe("@coda/coding-agent package contract", () => {
 			turndown: "^7.2.4",
 			"turndown-plugin-gfm": "^1.0.2",
 			undici: "^7.29.0",
+			yaml: "2.9.0",
 		});
 		expect(packageJson.scripts.build).toContain("node scripts/mark-bin-executable.mjs dist/bin.js");
 	});

@@ -25,6 +25,7 @@ import { createHooksCommandFlow, type HooksCommandFlowOptions } from "../command
 import { type McpCommandFlowOptions, openMcpCommand } from "../commands/mcp-flow.ts";
 import { createModelCommandFlow, type ModelCommandEntry } from "../commands/model-flow.ts";
 import { createPermissionsCommandFlow, type PermissionPreset } from "../commands/permissions-flow.ts";
+import { createPluginsCommandFlow, type PluginsCommand } from "../commands/plugins-flow.ts";
 import type { CommandRegistry } from "../commands/registry.ts";
 import {
 	createSessionCommandFlow,
@@ -49,6 +50,7 @@ import {
 	InteractiveInputController,
 	type InteractiveInputControllerOptions,
 } from "./input-controller.ts";
+import type { PreparedWorkInput } from "./input-types.ts";
 import type { InteractiveMcpElicitationHandler } from "./mcp-elicitation.ts";
 import {
 	type InteractiveProcessLifecycle,
@@ -56,6 +58,7 @@ import {
 	interactiveSignalExitCode,
 } from "./process-lifecycle.ts";
 import type { SessionPresentation } from "./session-presentation.ts";
+import type { InteractiveSkillMcpDependencyHandler } from "./skill-mcp-dependency.ts";
 import type { SessionStatusLineSnapshot, StatusLineSnapshot } from "./status-line.ts";
 import { SwitchableComponent } from "./switchable-component.ts";
 import { UserShell } from "./user-shell.ts";
@@ -102,6 +105,22 @@ function openPermissionsCommand(
 	);
 }
 
+export async function openPluginsCommand(
+	flow: CommandFlowOpener,
+	argument: string | undefined,
+	command: PluginsCommand | undefined,
+): Promise<void> {
+	if (!command) throw new Error("Plugin management is unavailable");
+	const selector = argument?.trim();
+	flow.open(
+		createPluginsCommandFlow({
+			snapshot: await command.snapshot(),
+			operations: command,
+			...(selector ? { selector } : {}),
+		}),
+	);
+}
+
 export interface InteractiveSessionOptions {
 	readonly work: SessionWorkController;
 	readonly presentation: SessionPresentation;
@@ -136,6 +155,7 @@ export interface InteractiveSessionOptions {
 		readonly snapshot: () => Promise<CodingSkillsSnapshot>;
 		readonly refresh: () => Promise<CodingSkillsSnapshot>;
 	};
+	readonly pluginsCommand?: PluginsCommand;
 	readonly mcpCommand?: McpCommandFlowOptions;
 	readonly hooksCommand?: HooksCommandFlowOptions;
 	readonly permissionsCommand?: {
@@ -149,7 +169,7 @@ export interface InteractiveSessionOptions {
 		takeUnrecoverable(): boolean;
 	};
 	readonly reasoning: string;
-	readonly initialPrompt?: AgentInput;
+	readonly initialPrompt?: AgentInput | PreparedWorkInput;
 	readonly initialAttachmentIds?: readonly string[];
 	readonly initialAttachments?: readonly ChatAttachment[];
 	readonly restoredAttachments?: ReadonlyMap<string, readonly ChatAttachment[]>;
@@ -181,6 +201,7 @@ export interface InteractiveRunOptions extends InteractiveSessionOptions {
 	readonly diagnostics?: DiagnosticSink;
 	readonly fullScreenOutput?: FullScreenOutputGate;
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
+	readonly skillMcpDependencies?: InteractiveSkillMcpDependencyHandler;
 	readonly commandPermission?: {
 		bind(
 			tui: Tui,
@@ -313,6 +334,7 @@ async function runMultiSessionInteractive(
 		root.select(pane.component);
 		pane.needsAttention = false;
 		options.mcpElicitation?.setActiveSession(pane.id);
+		options.skillMcpDependencies?.setActiveSession(pane.id);
 		await startPane(pane);
 		if (pane.contextOverflowPending) offerContextOverflowRecovery(pane);
 	};
@@ -322,6 +344,7 @@ async function runMultiSessionInteractive(
 		root.select(result.pane.component);
 		result.pane.needsAttention = false;
 		options.mcpElicitation?.setActiveSession(result.pane.id);
+		options.skillMcpDependencies?.setActiveSession(result.pane.id);
 		await startPane(result.pane);
 	};
 
@@ -336,6 +359,7 @@ async function runMultiSessionInteractive(
 			root.select(replacement.component);
 			replacement.needsAttention = false;
 			options.mcpElicitation?.setActiveSession(replacement.id);
+			options.skillMcpDependencies?.setActiveSession(replacement.id);
 			await startPane(replacement);
 			await options.onContextOverflowReplacement?.(replacement.options);
 			try {
@@ -493,8 +517,13 @@ async function runMultiSessionInteractive(
 						createSkillsCommandFlow({
 							snapshot: await sessionOptions.skillsCommand.snapshot(),
 							onRefresh: sessionOptions.skillsCommand.refresh,
+							onTry: (prefill) => component.prefillExtension({ ...prefill, source: "skill" }),
 						}),
 					);
+					return;
+				}
+				if (commandId === "core:plugins") {
+					await openPluginsCommand(flow, argument, sessionOptions.pluginsCommand);
 					return;
 				}
 				if (commandId === "core:mcp") {
@@ -652,6 +681,7 @@ async function runMultiSessionInteractive(
 		terminationSignal ??= signal;
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 		abortAll();
 		resolveExit();
 	};
@@ -659,6 +689,7 @@ async function runMultiSessionInteractive(
 		fatalError ??= error;
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 		abortAll();
 		resolveExit();
 	};
@@ -698,9 +729,21 @@ async function runMultiSessionInteractive(
 		if (waiting && pane !== panes.active) pane.needsAttention = true;
 	});
 	options.mcpElicitation?.setActiveSession(initialPane.id);
+	options.skillMcpDependencies?.bind(tui, options.terminal, (_request, sessionId, waiting) => {
+		const pane = panes.get(sessionId) ?? panes.active;
+		if (!pane) return;
+		pane.component.setActivityOverride(
+			`skill-mcp-dependency:${sessionId}`,
+			"Waiting for Skill MCP dependency consent",
+			waiting,
+		);
+		if (waiting && pane !== panes.active) pane.needsAttention = true;
+	});
+	options.skillMcpDependencies?.setActiveSession(initialPane.id);
 	if (terminationSignal || fatalError !== undefined) {
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 	}
 	try {
 		if (!(await startFullScreen())) {
@@ -725,6 +768,7 @@ async function runMultiSessionInteractive(
 		unsubscribeLifecycle?.();
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 		let droppedShells = 0;
 		for (const pane of panes.open) {
 			pane.detachAgent();
@@ -865,8 +909,13 @@ async function runSingleSessionInteractive(
 					createSkillsCommandFlow({
 						snapshot: await options.skillsCommand.snapshot(),
 						onRefresh: options.skillsCommand.refresh,
+						onTry: (prefill) => component.prefillExtension({ ...prefill, source: "skill" }),
 					}),
 				);
+				return;
+			}
+			if (commandId === "core:plugins") {
+				await openPluginsCommand(flow, argument, options.pluginsCommand);
 				return;
 			}
 			if (commandId === "core:mcp") {
@@ -924,6 +973,7 @@ async function runSingleSessionInteractive(
 		terminationSignal ??= signal;
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 		if (options.work.state().status === "running") void options.work.cancel().catch(() => undefined);
 		inputController.cancelUserShell();
 		resolveExit();
@@ -932,6 +982,7 @@ async function runSingleSessionInteractive(
 		fatalError ??= error;
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 		if (options.work.state().status === "running") void options.work.cancel().catch(() => undefined);
 		inputController.cancelUserShell();
 		resolveExit();
@@ -966,9 +1017,18 @@ async function runSingleSessionInteractive(
 		);
 	});
 	options.mcpElicitation?.setActiveSession(options.presentation.descriptor.id);
+	options.skillMcpDependencies?.bind(tui, options.terminal, (_request, _sessionId, waiting) => {
+		component.setActivityOverride(
+			`skill-mcp-dependency:${options.presentation.descriptor.id}`,
+			"Waiting for Skill MCP dependency consent",
+			waiting,
+		);
+	});
+	options.skillMcpDependencies?.setActiveSession(options.presentation.descriptor.id);
 	if (terminationSignal || fatalError !== undefined) {
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 	}
 	const detach = options.work.subscribe({
 		accept: (event) => {
@@ -1008,6 +1068,7 @@ async function runSingleSessionInteractive(
 		unsubscribeLifecycle?.();
 		options.commandPermission?.unbind();
 		options.mcpElicitation?.unbind();
+		options.skillMcpDependencies?.unbind();
 		detach();
 		const droppedShells = await inputController.close();
 		await stopFullScreen();

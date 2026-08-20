@@ -110,6 +110,10 @@ export class FullScreenOutputGate {
 			});
 	}
 
+	get active(): boolean {
+		return this.#lease !== undefined;
+	}
+
 	acquire(presenter: FullScreenDiagnosticPresenter): FullScreenOutputLease {
 		if (this.#lease) throw new Error("A full-screen output lease is already active");
 		const token = Symbol("full-screen-output");

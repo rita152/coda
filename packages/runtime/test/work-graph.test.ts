@@ -648,6 +648,114 @@ describe("Work Graph public Interface", () => {
 		await agent.close();
 	});
 
+	it("routes each accepted input's capability selection to only that Run acquisition", async () => {
+		const acquired: unknown[] = [];
+		const capabilitySource: RunCapabilitySource = {
+			id: "mcp",
+			acquire: (context) => {
+				acquired.push((context as { readonly selection?: unknown }).selection);
+				return {
+					revision: "selection-aware",
+					tools: [],
+					promptFragments: [],
+					dispose: () => undefined,
+				};
+			},
+		};
+		const { agent } = await harness([{}, {}], { capabilitySource });
+
+		for (const [graphId, toolId] of [
+			["graph:selection-a", "mcp:docs:tool-a"],
+			["graph:selection-b", "mcp:docs:tool-b"],
+		] as const) {
+			await expect(
+				agent.submit({
+					commands: [
+						start(graphId, 1),
+						{
+							type: "deliver_work_item_input",
+							graphId,
+							itemId: "root",
+							kind: "prompt",
+							input: `use ${toolId}`,
+							capabilitySelections: { mcp: { toolIds: [toolId] } },
+						} as never,
+					],
+				}),
+			).resolves.toMatchObject({ status: "accepted" });
+		}
+
+		await Promise.all([
+			waitForGraphResult(agent, "graph:selection-a"),
+			waitForGraphResult(agent, "graph:selection-b"),
+		]);
+		expect(acquired).toEqual([{ toolIds: ["mcp:docs:tool-a"] }, { toolIds: ["mcp:docs:tool-b"] }]);
+		await agent.close();
+	});
+
+	it("copies each parent Prepared Run selection into only its delegated child", async () => {
+		const acquired: unknown[] = [];
+		const capabilitySource: RunCapabilitySource = {
+			id: "mcp",
+			acquire: ({ selection }) => {
+				acquired.push(selection);
+				return {
+					revision: JSON.stringify(selection),
+					tools: [],
+					promptFragments: [],
+					dispose: () => undefined,
+				};
+			},
+		};
+		const { agent } = await harness(
+			[
+				{
+					message: delegationMessage("delegate:a", [
+						{ itemId: "child-a", objective: "child a", executionMode: "write" },
+					]),
+				},
+				{ message: fauxAssistantMessage("child a done", { timestamp: 1_000 }) },
+				{ message: fauxAssistantMessage("parent a done", { timestamp: 1_000 }) },
+				{
+					message: delegationMessage("delegate:b", [
+						{ itemId: "child-b", objective: "child b", executionMode: "write" },
+					]),
+				},
+				{ message: fauxAssistantMessage("child b done", { timestamp: 1_000 }) },
+				{ message: fauxAssistantMessage("parent b done", { timestamp: 1_000 }) },
+			],
+			{ capabilitySource },
+		);
+
+		for (const [graphId, toolId] of [
+			["graph:delegated-selection-a", "mcp:docs:tool-a"],
+			["graph:delegated-selection-b", "mcp:docs:tool-b"],
+		] as const) {
+			await agent.submit({
+				commands: [
+					start(graphId, 2),
+					{
+						type: "deliver_work_item_input",
+						graphId,
+						itemId: "root",
+						kind: "prompt",
+						input: `delegate with ${toolId}`,
+						capabilitySelections: { mcp: { toolIds: [toolId] } },
+					},
+				],
+			});
+			await expect(waitForGraphResult(agent, graphId)).resolves.toMatchObject({ outcome: "succeeded" });
+		}
+
+		expect(acquired).toEqual([
+			{ toolIds: ["mcp:docs:tool-a"] },
+			{ toolIds: ["mcp:docs:tool-a"] },
+			{ toolIds: ["mcp:docs:tool-b"] },
+			{ toolIds: ["mcp:docs:tool-b"] },
+		]);
+		await agent.close();
+	});
+
 	it("atomically rejects duplicate Prompt ownership before a Work Graph becomes visible", async () => {
 		const { agent, modelCalls } = await harness([]);
 		const receipt = await agent.submit({

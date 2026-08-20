@@ -1,12 +1,13 @@
-import type { AgentEvent, AgentInput, FollowUp, QueueItemId } from "@coda/agent";
+import { type AgentEvent, type AgentInput, cloneFrozen, type FollowUp, type QueueItemId } from "@coda/agent";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type {
 	ComposerExtensionReference,
 	ComposerSubmission,
 	ComposerSubmissionKind,
+	RunCapabilitySelections,
 } from "../session/composer-submission.ts";
 import type { Session } from "../session/types.ts";
-import type { UserShellSubmission } from "./input-types.ts";
+import type { PreparedWorkInput, UserShellSubmission } from "./input-types.ts";
 import type { UserShell } from "./user-shell.ts";
 
 const MAXIMUM_PENDING_FOLLOW_UPS = 32;
@@ -30,7 +31,7 @@ export interface InteractiveInputControllerOptions {
 			readonly composerText: string;
 			readonly references: readonly ComposerExtensionReference[];
 		},
-	) => Promise<AgentInput>;
+	) => Promise<AgentInput | PreparedWorkInput>;
 	readonly prepareAttachments: (attachmentIds: readonly string[]) => Promise<AttachmentTransaction>;
 	readonly allocateId: (kind: "composer_submission" | "user_shell") => string;
 	readonly userShell?: Pick<UserShell, "cancel" | "run" | "running">;
@@ -40,6 +41,7 @@ interface DeferredFollowUp {
 	readonly kind: "follow_up";
 	readonly id: QueueItemId;
 	readonly input: AgentInput;
+	readonly capabilitySelections?: RunCapabilitySelections;
 }
 
 interface DeferredExternal {
@@ -52,6 +54,16 @@ type DeferredWork = DeferredFollowUp | DeferredExternal;
 
 interface PendingResource {
 	readonly transaction: AttachmentTransaction;
+}
+
+function normalizePreparedWorkInput(input: AgentInput | PreparedWorkInput): PreparedWorkInput {
+	if (typeof input === "string" || Array.isArray(input)) return Object.freeze({ input });
+	return Object.freeze({
+		input: input.input,
+		...(input.capabilitySelections
+			? { capabilitySelections: cloneFrozen(input.capabilitySelections) as RunCapabilitySelections }
+			: {}),
+	});
 }
 
 /** Product interaction queue translated exclusively into public Work Graph operations. */
@@ -79,12 +91,19 @@ export class InteractiveInputController {
 		for (const submission of options.session.composerSubmissions ?? []) {
 			if (submission.queueItemId) this.#submissionByQueueItemId.set(submission.queueItemId, submission.id);
 		}
+		const submissionByQueueItemId = new Map(
+			(options.session.composerSubmissions ?? []).flatMap((submission) =>
+				submission.queueItemId ? [[submission.queueItemId, submission] as const] : [],
+			),
+		);
 		for (const item of options.session.seed.pendingFollowUps) {
+			const capabilitySelections = submissionByQueueItemId.get(item.id)?.capabilitySelections;
 			this.#deferred.push({
 				kind: "follow_up",
 				id: item.id,
 				input:
 					typeof item.content === "string" ? item.content : item.content.map((block) => structuredClone(block)),
+				...(capabilitySelections ? { capabilitySelections: cloneFrozen(capabilitySelections) } : {}),
 			});
 		}
 		this.#queuePaused = this.#deferred.length > 0;
@@ -132,6 +151,7 @@ export class InteractiveInputController {
 					prepared.transaction,
 					this.#resourceReferences(prepared.transaction, attachmentIds),
 					references,
+					prepared.capabilitySelections,
 				);
 				this.resumeQueue();
 				return result;
@@ -142,24 +162,35 @@ export class InteractiveInputController {
 				prepared.transaction,
 				this.#resourceReferences(prepared.transaction, attachmentIds),
 				references,
+				prepared.capabilitySelections,
 			);
 		});
 	}
 
-	submitInput(input: AgentInput, attachmentIds: readonly string[] = []): Promise<QueueItemId | undefined> {
+	submitInput(
+		input: AgentInput | PreparedWorkInput,
+		attachmentIds: readonly string[] = [],
+	): Promise<QueueItemId | undefined> {
 		return this.#serializeAcceptance(async () => {
+			const prepared = normalizePreparedWorkInput(input);
 			const transaction = await this.#options.prepareAttachments(attachmentIds);
 			if (this.queuePaused || this.#deferred.some(({ kind }) => kind === "follow_up")) {
 				const id = await this.#queueFollowUp(
-					input,
+					prepared.input,
 					transaction,
 					undefined,
 					this.#resourceReferences(transaction, attachmentIds),
+					prepared.capabilitySelections,
 				);
 				this.resumeQueue();
 				return id;
 			}
-			await this.#startPrompt(input, transaction, this.#resourceReferences(transaction, attachmentIds));
+			await this.#startPrompt(
+				prepared.input,
+				transaction,
+				this.#resourceReferences(transaction, attachmentIds),
+				prepared.capabilitySelections,
+			);
 			return undefined;
 		});
 	}
@@ -172,7 +203,13 @@ export class InteractiveInputController {
 	): Promise<ComposerSubmission | string> {
 		return this.#serializeAcceptance(async () => {
 			const prepared = await this.#prepareInput(text, attachmentIds, "steering", composerText, references);
-			const submission = await this.#recordComposerSubmission("steering", composerText, undefined, references);
+			const submission = await this.#recordComposerSubmission(
+				"steering",
+				composerText,
+				undefined,
+				references,
+				prepared.capabilitySelections,
+			);
 			const pending = { transaction: prepared.transaction };
 			this.#pendingSteering.push(pending);
 			try {
@@ -180,6 +217,7 @@ export class InteractiveInputController {
 					"steering",
 					prepared.input,
 					this.#resourceReferences(prepared.transaction, attachmentIds),
+					prepared.capabilitySelections,
 				);
 				return submission ?? this.#allocateQueueItem();
 			} catch (error) {
@@ -206,6 +244,7 @@ export class InteractiveInputController {
 				prepared.transaction,
 				this.#resourceReferences(prepared.transaction, attachmentIds),
 				references,
+				prepared.capabilitySelections,
 			);
 		});
 	}
@@ -316,10 +355,17 @@ export class InteractiveInputController {
 		transaction: AttachmentTransaction,
 		resources: readonly string[],
 		references?: readonly ComposerExtensionReference[],
+		capabilitySelections?: RunCapabilitySelections,
 	): Promise<ComposerSubmission | undefined> {
-		const submission = await this.#recordComposerSubmission("prompt", composerText, undefined, references);
+		const submission = await this.#recordComposerSubmission(
+			"prompt",
+			composerText,
+			undefined,
+			references,
+			capabilitySelections,
+		);
 		try {
-			await this.#startPrompt(input, transaction, resources);
+			await this.#startPrompt(input, transaction, resources, capabilitySelections);
 			return submission;
 		} catch (error) {
 			if (submission) await this.#retractComposerSubmission(submission.id);
@@ -332,12 +378,13 @@ export class InteractiveInputController {
 		input: AgentInput,
 		transaction: AttachmentTransaction,
 		resources: readonly string[],
+		capabilitySelections?: RunCapabilitySelections,
 	): Promise<void> {
 		if (this.#work.isBusy() || this.#active) throw new Error("This Session already owns active Work");
 		this.#acknowledgedFailure = false;
 		this.#pendingPrompt = { transaction };
 		try {
-			const begun = await this.#work.beginPrompt(input, resources);
+			const begun = await this.#work.beginPrompt(input, resources, capabilitySelections);
 			this.#track(begun.result);
 		} catch (error) {
 			this.#pendingPrompt = undefined;
@@ -351,11 +398,18 @@ export class InteractiveInputController {
 		transaction: AttachmentTransaction,
 		resources: readonly string[],
 		references?: readonly ComposerExtensionReference[],
+		capabilitySelections?: RunCapabilitySelections,
 	): Promise<ComposerSubmission | string> {
 		const id = this.#allocateQueueItem();
-		const submission = await this.#recordComposerSubmission("follow_up", composerText, id, references);
+		const submission = await this.#recordComposerSubmission(
+			"follow_up",
+			composerText,
+			id,
+			references,
+			capabilitySelections,
+		);
 		try {
-			await this.#queueFollowUp(input, transaction, id, resources);
+			await this.#queueFollowUp(input, transaction, id, resources, capabilitySelections);
 			if (submission) this.#submissionByQueueItemId.set(id, submission.id);
 			return submission ?? id;
 		} catch (error) {
@@ -369,6 +423,7 @@ export class InteractiveInputController {
 		transaction: AttachmentTransaction,
 		allocatedId?: QueueItemId,
 		resources: readonly string[] = [],
+		capabilitySelections?: RunCapabilitySelections,
 	): Promise<QueueItemId> {
 		this.#validateFollowUp(input);
 		const id = allocatedId ?? this.#allocateQueueItem();
@@ -376,7 +431,7 @@ export class InteractiveInputController {
 		if (this.#work.isBusy() && this.#deferred.length === 0) {
 			this.#deliveredFollowUps.push(id);
 			try {
-				await this.#work.deliver("follow_up", input, resources);
+				await this.#work.deliver("follow_up", input, resources, capabilitySelections);
 				await transaction.commit();
 				return id;
 			} catch (error) {
@@ -388,7 +443,12 @@ export class InteractiveInputController {
 			}
 		}
 		await transaction.commit();
-		this.#deferred.push({ kind: "follow_up", id, input: structuredClone(input) });
+		this.#deferred.push({
+			kind: "follow_up",
+			id,
+			input: structuredClone(input),
+			...(capabilitySelections ? { capabilitySelections: cloneFrozen(capabilitySelections) } : {}),
+		});
 		this.#scheduleQueue();
 		return id;
 	}
@@ -453,7 +513,7 @@ export class InteractiveInputController {
 				continue;
 			}
 			this.#queuedPromptId = item.id;
-			const operation = this.#work.prompt(item.input);
+			const operation = this.#work.prompt(item.input, [], item.capabilitySelections);
 			this.#active = operation;
 			try {
 				const result = await operation;
@@ -504,6 +564,7 @@ export class InteractiveInputController {
 		text: string,
 		queueItemId?: QueueItemId,
 		references?: readonly ComposerExtensionReference[],
+		capabilitySelections?: RunCapabilitySelections,
 	): Promise<ComposerSubmission | undefined> {
 		const normalized = text.trim();
 		if (!normalized) return undefined;
@@ -515,6 +576,7 @@ export class InteractiveInputController {
 				? { references: Object.freeze(references.map((reference) => Object.freeze({ ...reference }))) }
 				: {}),
 			...(queueItemId ? { queueItemId } : {}),
+			...(capabilitySelections ? { capabilitySelections: cloneFrozen(capabilitySelections) } : {}),
 		});
 		await this.#options.session.record({ type: "composer_submission_recorded", submission });
 		return submission;
@@ -544,10 +606,12 @@ export class InteractiveInputController {
 		kind: ComposerSubmissionKind,
 		composerText: string,
 		references: readonly ComposerExtensionReference[] = [],
-	): Promise<{ readonly input: AgentInput; readonly transaction: AttachmentTransaction }> {
-		const input = await this.#options.buildInput(text, attachmentIds, { kind, composerText, references });
+	): Promise<PreparedWorkInput & { readonly transaction: AttachmentTransaction }> {
+		const input = normalizePreparedWorkInput(
+			await this.#options.buildInput(text, attachmentIds, { kind, composerText, references }),
+		);
 		const transaction = await this.#options.prepareAttachments(attachmentIds);
-		return { input, transaction };
+		return { ...input, transaction };
 	}
 
 	#validateFollowUp(input: AgentInput): void {

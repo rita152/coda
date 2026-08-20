@@ -26,11 +26,17 @@ export interface McpHttpConfiguration {
 	readonly bearerTokenEnvironment?: string;
 }
 
+export interface McpOAuthConfiguration {
+	/** Client-managed local callback port retained from an explicit Skill dependency. */
+	readonly callbackPort?: number;
+}
+
 export interface McpServerConfiguration {
 	readonly id: string;
 	readonly enabled?: boolean;
 	readonly protocol?: McpProtocolPolicy;
 	readonly transport: McpStdioConfiguration | McpHttpConfiguration;
+	readonly oauth?: McpOAuthConfiguration;
 	readonly tools?: McpToolFilter;
 }
 
@@ -88,6 +94,24 @@ function parseTools(value: unknown, label: string): McpToolFilter | undefined {
 	return Object.freeze({ ...(include ? { include } : {}), ...(exclude ? { exclude } : {}) });
 }
 
+function parseOAuth(value: unknown, label: string): McpOAuthConfiguration | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) throw new Error(`${label} must be an object`);
+	requireOnlyKeys(value, ["callbackPort"], label);
+	if (
+		value.callbackPort !== undefined &&
+		(typeof value.callbackPort !== "number" ||
+			!Number.isInteger(value.callbackPort) ||
+			value.callbackPort < 1 ||
+			value.callbackPort > 65_535)
+	) {
+		throw new Error(`${label}.callbackPort must be an integer between 1 and 65535`);
+	}
+	return Object.freeze({
+		...(typeof value.callbackPort === "number" ? { callbackPort: value.callbackPort } : {}),
+	});
+}
+
 function parseTransport(value: unknown, label: string): McpStdioConfiguration | McpHttpConfiguration {
 	if (!isRecord(value)) throw new Error(`${label} must be an object`);
 	if (value.kind === "stdio") {
@@ -118,8 +142,13 @@ function parseTransport(value: unknown, label: string): McpStdioConfiguration | 
 	}
 	if (value.kind === "http") {
 		requireOnlyKeys(value, ["kind", "url", "headers", "bearerTokenEnvironment"], label);
-		if (typeof value.url !== "string" || value.url.length === 0) {
-			throw new Error(`${label}.url must be a non-empty string`);
+		if (
+			typeof value.url !== "string" ||
+			value.url.length === 0 ||
+			value.url.trim() !== value.url ||
+			!/^https?:\/\//iu.test(value.url)
+		) {
+			throw new Error(`${label}.url must be an absolute http(s) URL without credentials or a fragment`);
 		}
 		let url: URL;
 		try {
@@ -127,8 +156,14 @@ function parseTransport(value: unknown, label: string): McpStdioConfiguration | 
 		} catch {
 			throw new Error(`${label}.url must be a valid URL`);
 		}
-		if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.hash) {
-			throw new Error(`${label}.url must be an http(s) URL without credentials or a fragment`);
+		const authority = /^https?:\/\/([^/?#]*)/iu.exec(value.url)?.[1];
+		if (
+			(url.protocol !== "http:" && url.protocol !== "https:") ||
+			!authority ||
+			authority.includes("@") ||
+			value.url.includes("#")
+		) {
+			throw new Error(`${label}.url must be an absolute http(s) URL without credentials or a fragment`);
 		}
 		const headers = parseStringRecord(value.headers, `${label}.headers`);
 		if (headers) {
@@ -170,7 +205,7 @@ export function parseMcpServerConfigurations(value: unknown, label: string): rea
 		value.map((entry, index) => {
 			const entryLabel = `${label}[${index}]`;
 			if (!isRecord(entry)) throw new Error(`${entryLabel} must be an object`);
-			requireOnlyKeys(entry, ["id", "enabled", "protocol", "transport", "tools"], entryLabel);
+			requireOnlyKeys(entry, ["id", "enabled", "protocol", "transport", "oauth", "tools"], entryLabel);
 			if (typeof entry.id !== "string" || !SERVER_ID_PATTERN.test(entry.id)) {
 				throw new Error(`${entryLabel}.id is invalid`);
 			}
@@ -188,12 +223,14 @@ export function parseMcpServerConfigurations(value: unknown, label: string): rea
 				throw new Error(`${entryLabel}.protocol is invalid`);
 			}
 			const transport = parseTransport(entry.transport, `${entryLabel}.transport`);
+			const oauth = parseOAuth(entry.oauth, `${entryLabel}.oauth`);
 			const tools = parseTools(entry.tools, `${entryLabel}.tools`);
 			return Object.freeze({
 				id: entry.id,
 				...(typeof entry.enabled === "boolean" ? { enabled: entry.enabled } : {}),
 				...(typeof entry.protocol === "string" ? { protocol: entry.protocol as McpProtocolPolicy } : {}),
 				transport,
+				...(oauth ? { oauth } : {}),
 				...(tools ? { tools } : {}),
 			});
 		}),

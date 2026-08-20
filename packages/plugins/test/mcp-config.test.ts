@@ -24,6 +24,69 @@ afterEach(async () => {
 });
 
 describe("Agent Plugin MCP configuration", () => {
+	it("removes client-owned Streamable HTTP headers case-insensitively and preserves ordinary headers", async () => {
+		const root = await pluginRoot();
+		await writeFile(
+			join(root, "mcp.json"),
+			JSON.stringify({
+				$schema: AGENT_PLUGIN_MCP_SCHEMA,
+				mcpServers: {
+					remote: {
+						type: "streamable-http",
+						url: "https://example.test/mcp",
+						headers: {
+							Accept: "owned",
+							AUTHORIZATION: "owned",
+							Connection: "owned",
+							"Content-Encoding": "owned",
+							"content-length": "owned",
+							"CONTENT-TYPE": "owned",
+							Host: "owned",
+							"Last-Event-ID": "owned",
+							"Mcp-Protocol-Version": "owned",
+							"MCP-Session-ID": "owned",
+							"Proxy-Authorization": "owned",
+							TE: "owned",
+							Trailer: "owned",
+							"Transfer-Encoding": "owned",
+							Upgrade: "owned",
+							"User-Agent": "owned",
+							"X-Tenant": "portable",
+						},
+					},
+				},
+			}),
+		);
+
+		const snapshot = await createPlugins({ fileSystem: nodePluginFileSystem() }).load({ root, origin: "test" });
+
+		if (snapshot.status !== "loaded") throw new Error("expected a loaded plugin");
+		expect(snapshot.mcpServers).toEqual([
+			expect.objectContaining({
+				name: "remote",
+				configuration: {
+					type: "streamable-http",
+					url: "https://example.test/mcp",
+					headers: { "X-Tenant": "portable" },
+				},
+			}),
+		]);
+		const materialized = await snapshot.materializeMcp({ platform: "linux" });
+		expect(materialized).toMatchObject({
+			diagnostics: [],
+			servers: [
+				{
+					name: "remote",
+					transport: {
+						kind: "http",
+						url: "https://example.test/mcp",
+						headers: { "X-Tenant": "portable" },
+					},
+				},
+			],
+		});
+	});
+
 	it.each([
 		["invalid JSON", "{"],
 		[
@@ -119,10 +182,6 @@ describe("Agent Plugin MCP configuration", () => {
 		if (snapshot.status !== "loaded") throw new Error("expected a loaded plugin");
 		expect(snapshot.mcpServers.map(({ name }) => name)).toEqual([
 			"badBackslashCommand",
-			"badDataEscapeCwd",
-			"badRelativeEscapeCommand",
-			"badRelativeEscapeCwd",
-			"badRootEscapeCwd",
 			"validBare",
 			"validDataCwd",
 			"validNormalizedRelative",
@@ -130,6 +189,28 @@ describe("Agent Plugin MCP configuration", () => {
 			"validRepeatedSlash",
 			"validRootCwd",
 		]);
-		expect(snapshot.diagnostics.filter(({ code }) => code === "mcp-server-invalid")).toHaveLength(7);
+		expect(snapshot.diagnostics.filter(({ code }) => code === "mcp-server-invalid")).toHaveLength(11);
+	});
+
+	it("identifies invalid sibling MCP Servers from their structured member names", async () => {
+		const root = await pluginRoot();
+		await writeFile(
+			join(root, "mcp.json"),
+			JSON.stringify({
+				$schema: AGENT_PLUGIN_MCP_SCHEMA,
+				mcpServers: {
+					alpha: { type: "stdio", command: "/absolute/runner" },
+					beta: { type: "unknown", command: "runner" },
+				},
+			}),
+		);
+
+		const snapshot = await createPlugins({ fileSystem: nodePluginFileSystem() }).load({ root, origin: "test" });
+
+		if (snapshot.status !== "loaded") throw new Error("expected a loaded plugin");
+		expect(snapshot.diagnostics.filter(({ code }) => code === "mcp-server-invalid")).toEqual([
+			expect.objectContaining({ componentName: "alpha" }),
+			expect.objectContaining({ componentName: "beta" }),
+		]);
 	});
 });

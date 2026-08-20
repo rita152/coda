@@ -4,6 +4,11 @@ status: accepted
 
 # Load Agent Plugins through existing capability seams
 
+ADR-0063 supersedes this decision's exclusions of installation, enablement,
+lifecycle management, and a Plugin capability source. The portable loader and
+Skill/MCP seam ownership below remain accepted; the later Plugin source is
+prompt-only guidance derived from the same coherent Plugin Inventory.
+
 Coda implements the Agent Plugins 1.0.0 portable package contract in a private
 leaf `@coda/plugins` package. It loads one caller-selected directory, validates
 root `plugin.json`, discovers only fixed `skills/` and `mcp.json`, enforces the
@@ -38,8 +43,7 @@ supported Plugin Servers to the MCP Host's automatic version negotiation.
 Unsupported transports are skipped without
 invalidating independent components, and legacy HTTP+SSE remains excluded.
 ADR-0046 also remains unchanged: Agent Plugins are inputs to the existing Skill
-and MCP sources, not a generic capability source, dependency-injection system,
-or plugin container.
+and MCP sources, not a generic dependency-injection system or plugin container.
 
 The executable dependency direction is therefore `plugins -> {skills, mcp}`
 and `coding-agent -> plugins`; `runtime` cannot know `@coda/plugins`. Inside the

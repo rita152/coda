@@ -1,7 +1,39 @@
+import { access, lstat, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createMcpHost, createSdkMcpConnector } from "../src/index.ts";
 import { materializeStdioEnvironment } from "../src/sdk-connector.ts";
+
+function wireFetch(): typeof globalThis.fetch {
+	return async (_input, init) => {
+		if (typeof init?.body !== "string") throw new Error("Expected a JSON request body");
+		const message = JSON.parse(init.body) as Record<string, unknown>;
+		if (message.method === "server/discover") {
+			return Response.json({
+				jsonrpc: "2.0",
+				id: message.id,
+				result: {
+					supportedVersions: ["2026-07-28"],
+					capabilities: { tools: {} },
+					_meta: { "io.modelcontextprotocol/serverInfo": { name: "http-sibling", version: "1.0.0" } },
+				},
+			});
+		}
+		return Response.json({
+			jsonrpc: "2.0",
+			id: message.id,
+			result: {
+				resultType: "complete",
+				ttlMs: 0,
+				cacheScope: "private",
+				...(message.method === "tools/list" ? { tools: [] } : {}),
+				_meta: { "io.modelcontextprotocol/serverInfo": { name: "http-sibling", version: "1.0.0" } },
+			},
+		});
+	};
+}
 
 describe("official SDK stdio adapter", () => {
 	it("keeps one admitted Path spelling under Windows environment semantics", () => {
@@ -83,5 +115,84 @@ describe("official SDK stdio adapter", () => {
 		} finally {
 			await host.close();
 		}
+	});
+
+	it("runs a runtime-only launch guard before stdio spawn and keeps an HTTP sibling ready", async () => {
+		const root = await realpath(await mkdtemp(join(tmpdir(), "coda-mcp-launch-guard-")));
+		const outside = await realpath(await mkdtemp(join(tmpdir(), "coda-mcp-launch-outside-")));
+		const command = join(root, "server");
+		const displaced = join(root, "server-displaced");
+		const outsideCommand = join(outside, "server");
+		const marker = join(outside, "spawned");
+		await writeFile(command, "original\n");
+		await writeFile(outsideCommand, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`);
+		const identity = await lstat(command);
+		await rename(command, displaced);
+		await symlink(outsideCommand, command);
+		let guardCalls = 0;
+		const host = createMcpHost({ connector: createSdkMcpConnector({ fetch: wireFetch() }) });
+		try {
+			const snapshot = await host.reload([
+				{
+					id: "guarded",
+					protocol: "auto",
+					transport: {
+						kind: "stdio",
+						command,
+						beforeLaunch: async (signal) => {
+							guardCalls++;
+							signal?.throwIfAborted();
+							const current = await lstat(command);
+							if (current.isSymbolicLink() || current.dev !== identity.dev || current.ino !== identity.ino) {
+								throw new Error("stdio launch lease changed");
+							}
+						},
+					},
+				},
+				{
+					id: "remote",
+					protocol: "2026-07-28",
+					transport: { kind: "http", url: "https://example.test/mcp" },
+				},
+			]);
+
+			expect(guardCalls).toBe(1);
+			expect(snapshot.servers).toEqual([
+				expect.objectContaining({ id: "guarded", status: "degraded", error: "stdio launch lease changed" }),
+				expect.objectContaining({ id: "remote", status: "ready" }),
+			]);
+			await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			await host.close();
+			await rm(root, { recursive: true, force: true });
+			await rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("passes connector cancellation to the stdio launch guard and never starts the child", async () => {
+		const controller = new AbortController();
+		const reason = new Error("cancel guarded launch");
+		let observedSignal: AbortSignal | undefined;
+		const connector = createSdkMcpConnector();
+
+		await expect(
+			connector.connect(
+				{
+					id: "guarded",
+					protocol: "auto",
+					transport: {
+						kind: "stdio",
+						command: "/coda/must-not-spawn",
+						beforeLaunch: async (signal) => {
+							observedSignal = signal;
+							controller.abort(reason);
+							signal?.throwIfAborted();
+						},
+					},
+				},
+				{ signal: controller.signal },
+			),
+		).rejects.toBe(reason);
+		expect(observedSignal).toBe(controller.signal);
 	});
 });

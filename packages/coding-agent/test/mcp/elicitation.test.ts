@@ -45,6 +45,7 @@ function request(
 	return {
 		server: {
 			id: "deploy",
+			semanticName: "deploy",
 			status: "ready",
 			server: { name: "Deployment Service", version: "1.0.0" },
 			toolCount: 1,
@@ -52,6 +53,7 @@ function request(
 		tool: {
 			id: "mcp:deploy:release",
 			serverId: "deploy",
+			serverSemanticName: "deploy",
 			remoteName: "release",
 			name: "mcp__deploy__release",
 			description: "Release",

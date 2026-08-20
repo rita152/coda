@@ -1,10 +1,10 @@
 import type { RunResult, ToolExecutionContext } from "@coda/agent";
 import type { LifecycleHookHost, SubagentHookContext } from "../lifecycle-hooks.ts";
-import { createDelegateTool, type DelegateChildSpecification } from "./delegate-tool.ts";
+import type { DelegateChildSpecification } from "./delegate-tool.ts";
 import type { DurableGraphStore } from "./durable-graph-store.ts";
 import type { ObservationBus, RuntimeTime, WorkerControlSink, WorkspacePlacement } from "./ports.ts";
 import type { SessionLeaseRegistry } from "./session-registry.ts";
-import type { WorkResult } from "./types.ts";
+import type { RunCapabilitySelections, WorkResult } from "./types.ts";
 import { WORK_GRAPH_FACT_VERSION } from "./work-graph-fact.ts";
 import { errorMessage, type GraphRecord, type ItemRecord, isTerminal } from "./work-graph-records.ts";
 import type { WorkerFact, WorkerFactProjection } from "./worker-fact.ts";
@@ -24,11 +24,16 @@ export interface WorkerLifecycleOpenRequest extends Omit<PrivateWorkerOpenReques
 	readonly delegate?: (
 		specifications: readonly DelegateChildSpecification[],
 		context: ToolExecutionContext,
+		capabilitySelections: RunCapabilitySelections | undefined,
 	) => Promise<readonly WorkResult[]>;
 }
 
 export interface WorkerProgressionHost {
-	delegate(specifications: readonly DelegateChildSpecification[], signal: AbortSignal): Promise<readonly WorkResult[]>;
+	delegate(
+		specifications: readonly DelegateChildSpecification[],
+		signal: AbortSignal,
+		capabilitySelections: RunCapabilitySelections | undefined,
+	): Promise<readonly WorkResult[]>;
 	promptSubmission(): WorkerSubmission;
 	transition(to: "settling"): Promise<boolean>;
 	settleItem(): Promise<void>;
@@ -125,19 +130,9 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 
 	open(request: WorkerLifecycleOpenRequest): ReturnType<typeof openPrivateWorkerRuntime> {
 		if (!this.#runtimeOptions) throw new Error("WorkerLifecycle runtime capabilities are unavailable");
-		const { delegate, ...runtime } = request;
 		return openPrivateWorkerRuntime({
-			...runtime,
+			...request,
 			options: this.#runtimeOptions,
-			...(delegate
-				? {
-						coordinatorTools: [
-							createDelegateTool({
-								execute: delegate,
-							}),
-						],
-					}
-				: {}),
 		});
 	}
 
@@ -418,7 +413,10 @@ export class WorkerLifecycle implements WorkerRuntimePort {
 					session: item.process.session!,
 					placement: item.process.placement!,
 					...(item.executionMode === "write"
-						? { delegate: (specifications, context) => host.delegate(specifications, context.signal) }
+						? {
+								delegate: (specifications, context, capabilitySelections) =>
+									host.delegate(specifications, context.signal, capabilitySelections),
+							}
 						: {}),
 					commitFact: (fact, runtimeId, sessionId) => this.commitFact(graph, item, fact, runtimeId, sessionId),
 					publishObservation: (observation, runtimeId, sessionId) =>

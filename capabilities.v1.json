@@ -101,6 +101,12 @@
         "arguments": "none"
       },
       {
+        "name": "plugins",
+        "aliases": [],
+        "visible": true,
+        "arguments": "tail"
+      },
+      {
         "name": "mcp",
         "aliases": [],
         "visible": true,
@@ -403,7 +409,7 @@
       "package": "@coda/mcp",
       "status": "runtime-supported",
       "title": "MCP Host",
-      "summary": "MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, mention-gated Run admission, progress, cancellation, subscriptions, and form or URL Elicitation.",
+      "summary": "MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, direct immutable per-Run exposure, Agent Plugin model-spec budgets, progress, cancellation, subscriptions, and form or URL Elicitation.",
       "sources": [
         "packages/coding-agent/src/mcp/registry.ts",
         "packages/coding-agent/src/mcp/run-capability.ts",

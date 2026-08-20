@@ -24,6 +24,17 @@ function setup() {
 }
 
 describe("FullScreenOutputGate", () => {
+	it("reports whether a full-screen lease is active", async () => {
+		const { gate } = setup();
+		expect(gate.active).toBe(false);
+
+		const lease = gate.acquire({ presentDiagnostic: () => undefined });
+		expect(gate.active).toBe(true);
+
+		await lease.release();
+		expect(gate.active).toBe(false);
+	});
+
 	it("presents diagnostics and buffers application stdout and stderr until its lease is released", async () => {
 		const { gate, stderr, stdout } = setup();
 		const presented = vi.fn<(diagnostic: Diagnostic) => void>();

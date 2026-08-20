@@ -6,6 +6,7 @@ import type { HookTrustRecord } from "../hooks/types.ts";
 import type { McpServerConfiguration, WorkspaceMcpTrustRecord } from "../mcp/config.ts";
 import type { ModelSelection } from "../models/model-selection.ts";
 import type { CustomProviderConfig } from "../models/types.ts";
+import type { PluginEnablementSettings } from "../plugins/types.ts";
 
 export const WEB_SEARCH_PROVIDER_IDS = ["brave", "tavily", "searxng", "duckduckgo"] as const;
 
@@ -40,6 +41,7 @@ export interface ProjectTrustRecord {
 export interface UserSettings {
 	readonly defaultModel?: ModelSelection;
 	readonly defaultReasoning?: ThinkingLevel | "off";
+	readonly plugins?: PluginEnablementSettings;
 	readonly customProviders?: readonly CustomProviderConfig[];
 	readonly projectTrust?: readonly ProjectTrustRecord[];
 	readonly mcpServers?: readonly McpServerConfiguration[];
@@ -65,5 +67,10 @@ export interface UserSettings {
 
 export interface SettingsStore {
 	load(): Promise<UserSettings>;
+	/**
+	 * Atomically read, validate, mutate, and commit the latest durable settings.
+	 * The mutator is synchronous and may be invoked only once per update.
+	 */
+	update?(mutator: (settings: UserSettings) => UserSettings): Promise<UserSettings>;
 	save(settings: UserSettings): Promise<void>;
 }

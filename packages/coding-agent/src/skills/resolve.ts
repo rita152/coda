@@ -13,7 +13,8 @@ export function resolveSkillSelector(snapshot: CodingSkillsSnapshot, value: stri
 	if (byId) return byId;
 	const normalized = normalize(trimmed);
 	const winners = snapshot.resolved.filter(
-		(entry) => entry.winner && normalize(entry.candidate.metadata.name) === normalized,
+		(entry) =>
+			entry.origin.kind === "direct" && entry.winner && normalize(entry.candidate.metadata.name) === normalized,
 	);
 	if (winners.length === 1) return winners[0];
 	const qualified = snapshot.resolved.filter(

@@ -7,6 +7,89 @@ import { agentWorkPort, createTestAgent } from "./agent-runtime-adapter.ts";
 import { testTimeRuntime } from "./time-runtime.ts";
 
 describe("InteractiveInputController", () => {
+	it("keeps a queued Follow-up's MCP selection when ordinary Steering is submitted afterward", async () => {
+		const deliver = vi.fn(async (..._arguments: unknown[]) => undefined);
+		const work = {
+			isBusy: () => true,
+			deliver,
+			beginPrompt: async () => {
+				throw new Error("prompt not expected");
+			},
+			prompt: async () => {
+				throw new Error("prompt not expected");
+			},
+			cancel: async () => undefined,
+			subscribe: () => () => undefined,
+		};
+		const record = vi.fn(async (_change: Parameters<Session["record"]>[0]) => undefined);
+		const controller = new InteractiveInputController({
+			work: work as never,
+			session: testSession(record),
+			buildInput: (async (text: string) =>
+				text.includes("$toolA")
+					? { input: text, capabilitySelections: { mcp: { toolIds: ["mcp:docs:tool-a"] } } }
+					: { input: text }) as never,
+			prepareAttachments: async () => emptyTransaction(),
+			allocateId: sequenceIds(),
+		});
+
+		await controller.followUp("Use $toolA", []);
+		await controller.steer("Keep going", []);
+
+		expect(deliver.mock.calls).toHaveLength(2);
+		expect(deliver.mock.calls[0]?.[3]).toEqual({ mcp: { toolIds: ["mcp:docs:tool-a"] } });
+		expect(deliver.mock.calls[1]?.[3]).toBeUndefined();
+		expect(record).toHaveBeenCalledWith({
+			type: "composer_submission_recorded",
+			submission: expect.objectContaining({
+				kind: "follow_up",
+				capabilitySelections: { mcp: { toolIds: ["mcp:docs:tool-a"] } },
+			}),
+		});
+	});
+
+	it("restores a durable Follow-up's saved capability selection before starting its Run", async () => {
+		const prompt = vi.fn(async (..._arguments: unknown[]) => ({ state: "succeeded" }));
+		const work = {
+			isBusy: () => false,
+			prompt,
+			beginPrompt: async () => {
+				throw new Error("beginPrompt not expected");
+			},
+			deliver: async () => {
+				throw new Error("deliver not expected");
+			},
+			cancel: async () => undefined,
+			subscribe: () => () => undefined,
+		};
+		const controller = new InteractiveInputController({
+			work: work as never,
+			session: testSession(
+				async () => undefined,
+				[
+					{
+						id: "composer_submission:restored",
+						kind: "follow_up",
+						text: "Use $toolA",
+						queueItemId: "queue:restored",
+						capabilitySelections: { mcp: { toolIds: ["mcp:docs:tool-a"] } },
+					} as never,
+				],
+				[{ id: "queue:restored" as QueueItemId, content: "Use $toolA" }],
+			),
+			buildInput: async (text) => text,
+			prepareAttachments: async () => emptyTransaction(),
+			allocateId: sequenceIds(),
+		});
+
+		controller.resumeQueue();
+		await controller.waitForIdle();
+
+		expect(prompt).toHaveBeenCalledWith("Use $toolA", [], {
+			mcp: { toolIds: ["mcp:docs:tool-a"] },
+		});
+	});
+
 	it("records structured extension references with the Composer submission", async () => {
 		let id = 0;
 		const runtime = testTimeRuntime(90);

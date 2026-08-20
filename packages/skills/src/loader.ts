@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { parseAgentSkill, validateAgentSkill } from "./parser.ts";
 import type {
 	CreateSkillsOptions,
@@ -41,6 +41,8 @@ interface CandidateBuilder<Origin> {
 	readonly revision: SkillRevision;
 	readonly directory: string;
 	readonly skillFile: string;
+	readonly canonicalDirectory: string;
+	readonly canonicalSkillFile: string;
 	readonly parsed: ParsedAgentSkill;
 	readonly provenance: SkillProvenance<Origin>[];
 	readonly diagnostics: SkillDiagnostic<Origin>[];
@@ -48,6 +50,8 @@ interface CandidateBuilder<Origin> {
 
 interface PrivateCandidate<Origin> {
 	readonly candidate: SkillCandidate<Origin>;
+	readonly canonicalDirectory: string;
+	readonly canonicalSkillFile: string;
 }
 
 interface DiscoveryState<Origin> {
@@ -304,6 +308,7 @@ function candidateDiagnostics<Origin>(
 
 async function loadCandidate<Origin>(
 	lexicalDirectory: string,
+	canonicalDirectory: string,
 	canonicalFile: string,
 	status: SkillFileStatus,
 	depth: number,
@@ -410,8 +415,10 @@ async function loadCandidate<Origin>(
 	state.candidates.set(canonicalFile, {
 		id: skillId(canonicalFile),
 		revision: revisionFor(skillHash),
-		directory: dirname(canonicalFile),
-		skillFile: canonicalFile,
+		directory: lexicalDirectory,
+		skillFile: join(lexicalDirectory, SKILL_FILE),
+		canonicalDirectory,
+		canonicalSkillFile: canonicalFile,
 		parsed: parsed.skill,
 		provenance: [provenance],
 		diagnostics: [...parsedDiagnostics],
@@ -497,7 +504,17 @@ async function walkDirectory<Origin>(
 	const skillEntry = entries.find((entry) => entry.name === SKILL_FILE);
 	if (skillEntry) {
 		const resolved = await resolveEntry(join(lexicalDirectory, SKILL_FILE), skillEntry.kind, root, state);
-		if (resolved) await loadCandidate(lexicalDirectory, resolved.canonicalPath, resolved.status, depth, root, state);
+		if (resolved) {
+			await loadCandidate(
+				lexicalDirectory,
+				canonicalDirectory,
+				resolved.canonicalPath,
+				resolved.status,
+				depth,
+				root,
+				state,
+			);
+		}
 		return;
 	}
 	for (const entry of entries) {
@@ -511,8 +528,8 @@ async function walkDirectory<Origin>(
 	}
 }
 
-function freezeCandidate<Origin>(builder: CandidateBuilder<Origin>): SkillCandidate<Origin> {
-	return Object.freeze({
+function freezeCandidate<Origin>(builder: CandidateBuilder<Origin>): PrivateCandidate<Origin> {
+	const candidate: SkillCandidate<Origin> = Object.freeze({
 		id: builder.id,
 		revision: builder.revision,
 		directory: builder.directory,
@@ -522,14 +539,20 @@ function freezeCandidate<Origin>(builder: CandidateBuilder<Origin>): SkillCandid
 		provenance: Object.freeze([...builder.provenance]),
 		diagnostics: Object.freeze([...builder.diagnostics]),
 	});
+	return Object.freeze({
+		candidate,
+		canonicalDirectory: builder.canonicalDirectory,
+		canonicalSkillFile: builder.canonicalSkillFile,
+	});
 }
 
 async function listResources<Origin>(
-	candidate: SkillCandidate<Origin>,
+	privateCandidate: PrivateCandidate<Origin>,
 	fileSystem: SkillFileSystem,
 	limits: Readonly<SkillLimits>,
 	signal: AbortSignal | undefined,
 ): Promise<{ readonly resources: readonly string[]; readonly diagnostics: readonly SkillDiagnostic<Origin>[] }> {
+	const candidate = privateCandidate.candidate;
 	const resources: string[] = [];
 	const diagnostics: SkillDiagnostic<Origin>[] = [];
 	const origin = candidate.provenance[0]?.origin;
@@ -633,7 +656,35 @@ async function listResources<Origin>(
 				continue;
 			}
 			if (status.kind === "file") {
-				resources.push(relativePath);
+				try {
+					const canonicalPath = await fileSystem.realpath(path);
+					const canonicalStatus = await fileSystem.stat(canonicalPath);
+					signal?.throwIfAborted();
+					if (canonicalStatus.kind === "file" && isContained(privateCandidate.canonicalDirectory, canonicalPath)) {
+						resources.push(relativePath);
+					} else {
+						diagnostics.push(
+							diagnostic(
+								"resource-symlink-skipped",
+								"info",
+								"resource",
+								"Ignored resource file outside the Skill bundle",
+								{ path, ...(origin !== undefined ? { origin } : {}) },
+							),
+						);
+					}
+				} catch (error) {
+					signal?.throwIfAborted();
+					diagnostics.push(
+						diagnostic(
+							"resource-read-failed",
+							"warning",
+							"resource",
+							`Could not resolve Skill resource file: ${String(error)}`,
+							{ path, ...(origin !== undefined ? { origin } : {}) },
+						),
+					);
+				}
 				continue;
 			}
 			if (status.kind !== "directory") continue;
@@ -643,8 +694,7 @@ async function listResources<Origin>(
 				signal?.throwIfAborted();
 				if (
 					canonicalStatus.kind !== "directory" ||
-					canonicalPath !== path ||
-					!isContained(candidate.directory, canonicalPath)
+					!isContained(privateCandidate.canonicalDirectory, canonicalPath)
 				) {
 					diagnostics.push(
 						diagnostic(
@@ -672,7 +722,7 @@ async function listResources<Origin>(
 			}
 		}
 	};
-	await walk(candidate.directory, candidate.directory, 0);
+	await walk(candidate.directory, privateCandidate.canonicalDirectory, 0);
 	return Object.freeze({ resources: Object.freeze(resources), diagnostics: Object.freeze(diagnostics) });
 }
 
@@ -688,14 +738,19 @@ async function activateCandidate<Origin>(
 	try {
 		const canonicalFile = await fileSystem.realpath(candidate.skillFile);
 		options?.signal?.throwIfAborted();
-		if (canonicalFile !== candidate.skillFile) throw new Error("SKILL.md canonical identity changed");
-		const status = await fileSystem.lstat(candidate.skillFile);
+		if (canonicalFile !== privateCandidate.canonicalSkillFile) {
+			throw new Error("SKILL.md canonical identity changed");
+		}
+		const status = await fileSystem.lstat(privateCandidate.canonicalSkillFile);
 		options?.signal?.throwIfAborted();
 		if (status.kind !== "file" || status.size > limits.maxSkillFileBytes)
 			throw new Error("SKILL.md changed kind or size");
-		const bytes = await fileSystem.readFile(candidate.skillFile);
+		const bytes = await fileSystem.readFile(privateCandidate.canonicalSkillFile);
 		options?.signal?.throwIfAborted();
 		if (bytes.byteLength > limits.maxSkillFileBytes) throw new Error("SKILL.md exceeds the activation size limit");
+		if ((await fileSystem.realpath(candidate.skillFile)) !== privateCandidate.canonicalSkillFile) {
+			throw new Error("SKILL.md canonical identity changed");
+		}
 		const text = decodeText(bytes);
 		if (text.includes("\0")) throw new Error("SKILL.md contains a NUL byte");
 		const revision = revisionFor(sha256(bytes));
@@ -717,13 +772,17 @@ async function activateCandidate<Origin>(
 			maxYamlDepth: limits.maxYamlDepth,
 		});
 		if (!parsed.skill) throw new Error("SKILL.md no longer parses");
-		const resources = await listResources(candidate, fileSystem, limits, options?.signal);
+		if ((await fileSystem.realpath(candidate.directory)) !== privateCandidate.canonicalDirectory) {
+			throw new Error("Skill bundle canonical identity changed");
+		}
+		const resources = await listResources(privateCandidate, fileSystem, limits, options?.signal);
 		const activationDiagnostics = resources.diagnostics;
 		return Object.freeze({
 			ok: true,
 			activation: Object.freeze({
 				candidate,
 				revision,
+				contents: text,
 				body: parsed.skill.body,
 				baseDirectory: candidate.directory,
 				...(safeArguments(options?.arguments) ? { arguments: safeArguments(options?.arguments) } : {}),
@@ -769,12 +828,13 @@ async function createSnapshot<Origin>(
 		if (!root) continue;
 		await walkDirectory(root.lexicalRoot, root.canonicalRoot, 0, root, state, new Set());
 	}
-	const candidates = Object.freeze(
+	const finalized = Object.freeze(
 		[...state.candidates.values()]
 			.map(freezeCandidate)
-			.sort((left, right) => compareText(left.skillFile, right.skillFile)),
+			.sort((left, right) => compareText(left.candidate.skillFile, right.candidate.skillFile)),
 	);
-	const privateCandidates = new Map(candidates.map((candidate) => [candidate.id, Object.freeze({ candidate })]));
+	const candidates = Object.freeze(finalized.map(({ candidate }) => candidate));
+	const privateCandidates = new Map(finalized.map((candidate) => [candidate.candidate.id, candidate]));
 	const diagnostics = Object.freeze([...state.diagnostics]);
 	const snapshot: SkillsSnapshot<Origin> = {
 		candidates,

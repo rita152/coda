@@ -39,6 +39,34 @@ describe("CommandFlowHost", () => {
 		expect(host.view).toBeUndefined();
 	});
 
+	it("dismisses a pending confirmation when Escape unwinds its frame", () => {
+		const onDismiss = vi.fn();
+		const host = new CommandFlowHost();
+		host.open({
+			id: "root",
+			title: "Root",
+			items: [
+				{
+					id: "open",
+					label: "Open",
+					onSelect: (navigation) =>
+						navigation.push({
+							id: "confirm",
+							title: "Confirm",
+							onDismiss,
+							items: [{ id: "yes", label: "Yes" }],
+						}),
+				},
+			],
+		});
+
+		host.handleInput(key("enter"));
+		host.handleInput(key("escape"));
+
+		expect(onDismiss).toHaveBeenCalledOnce();
+		expect(host.view?.menuId).toBe("root");
+	});
+
 	it("moves the menu selection with arrow keys", () => {
 		const host = new CommandFlowHost();
 		host.open({

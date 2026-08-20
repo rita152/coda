@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "fixture-mcp-only",
+  "version": "1.0.0",
+  "description": "Offline MCP-only Agent Plugin fixture"
+}

@@ -128,6 +128,128 @@ async function until(predicate: () => boolean): Promise<void> {
 }
 
 describe("interactive TUI mode", () => {
+	it.each([
+		{ decision: "Install", input: "install", installed: true },
+		{ decision: "Continue anyway", input: "continue", installed: false },
+		{ decision: "Escape", input: "escape", installed: false },
+	] as const)(
+		"handles Skill MCP dependency consent through the active TUI with $decision and no second full-screen prompt",
+		async ({ input, installed }) => {
+			const workspace = await mkdtemp(join(tmpdir(), "coda-interactive-skill-mcp-workspace-"));
+			const homeDirectory = await mkdtemp(join(tmpdir(), "coda-interactive-skill-mcp-home-"));
+			temporaryDirectories.push(workspace, homeDirectory);
+			const skillRoot = join(workspace, ".agents", "skills", "review");
+			await mkdir(join(skillRoot, "agents"), { recursive: true });
+			await writeFile(
+				join(skillRoot, "SKILL.md"),
+				"---\nname: review\ndescription: Review with external docs\n---\n\nUse the selected review workflow.\n",
+			);
+			await writeFile(
+				join(skillRoot, "agents", "openai.yaml"),
+				[
+					"dependencies:",
+					"  tools:",
+					"    - type: mcp",
+					"      value: docs",
+					"      transport: streamable_http",
+					"      url: https://docs.example.test/mcp",
+					"policy:",
+					"  products: [codex]",
+					"",
+				].join("\n"),
+			);
+			const runtime = testTimeRuntime(1_025);
+			const faux = fauxProvider({ runtime });
+			faux.setResponses([
+				(context) => {
+					expect(JSON.stringify(context.messages.at(-1)?.content)).toContain("Use the selected review workflow.");
+					return fauxAssistantMessage("first review complete", { timestamp: 1_025 });
+				},
+				(context) => {
+					expect(JSON.stringify(context.messages.at(-1)?.content)).toContain("Use the selected review workflow.");
+					return fauxAssistantMessage("follow-up review complete", { timestamp: 1_026 });
+				},
+			]);
+			const models = createModels({ runtime });
+			models.setProvider(faux.provider);
+			const connection: McpConnection = {
+				info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+				listTools: async () => [],
+				callTool: async () => ({ isError: false, content: [] }),
+				close: async () => undefined,
+			};
+			const connect = vi.fn(async () => connection);
+			const terminal = new TrackingTerminal({ columns: 100, rows: 30 });
+			const stdout = new BufferOutput();
+			const stderr = new BufferOutput();
+			let settings: UserSettings = {
+				defaultModel: { provider: faux.getModel().provider, id: faux.getModel().id },
+			};
+			const save = vi.fn(async (value: UserSettings) => {
+				settings = structuredClone(value);
+			});
+			let id = 0;
+			const application = createCodingAgentApplication({
+				models,
+				mcpConnector: { connect },
+				settings: { load: async () => structuredClone(settings), save },
+				fileSystem: createNodeFileSystem(),
+				processRunner: createNodeProcessRunner({ platform: "darwin" }),
+				terminalFactory: { create: () => terminal },
+				io: { stdin: { isTTY: true, readAll: async () => "" }, stdout, stderr },
+				runtime: {
+					cwd: workspace,
+					homeDirectory,
+					platform: "darwin",
+					environment: {},
+					clock: runtime.clock,
+					idGenerator: { generate: (kind) => `${kind}:${++id}` },
+					scheduler: createSystemScheduler(),
+				},
+			});
+
+			const running = application.run(["--interactive", "--no-session"]);
+			await until(() => terminal.started && stripAnsi(terminal.readOutput()).includes("faux/faux-1"));
+			await terminal.emit({ type: "text", text: "$review first" });
+			await terminal.emit(key("enter"));
+			await until(() => stripAnsi(terminal.readOutput()).includes("Install MCP servers?"));
+			const dependencyPrompt = stripAnsi(terminal.readOutput());
+			expect(dependencyPrompt).toContain("Install");
+			expect(dependencyPrompt).toContain("Continue anyway");
+			if (input === "install") {
+				await terminal.emit(key("enter"));
+			} else if (input === "continue") {
+				await terminal.emit(key("down"));
+				await terminal.emit(key("enter"));
+			} else {
+				await terminal.emit(key("escape"));
+			}
+			await until(() => stripAnsi(terminal.readOutput()).includes("first review complete"));
+
+			await terminal.emit({ type: "text", text: "$review second" });
+			await terminal.emit(key("enter"));
+			await until(() => stripAnsi(terminal.readOutput()).includes("follow-up review complete"));
+			await terminal.emit(key("c", { control: true, text: "c" }));
+			await terminal.emit(key("c", { control: true, text: "c" }));
+
+			await expect(running).resolves.toBe(0);
+			expect(faux.state.callCount).toBe(2);
+			expect(terminal.startCalls).toBe(1);
+			if (installed) {
+				expect(save).toHaveBeenCalledOnce();
+				expect(connect).toHaveBeenCalledOnce();
+				expect(settings.mcpServers).toEqual([
+					{ id: "docs", transport: { kind: "http", url: "https://docs.example.test/mcp" } },
+				]);
+			} else {
+				expect(save).not.toHaveBeenCalled();
+				expect(connect).not.toHaveBeenCalled();
+				expect(settings.mcpServers).toBeUndefined();
+			}
+			expect(stderr.value).toBe("");
+		},
+	);
+
 	it("lets the CLI color scheme override user settings before Terminal startup", async () => {
 		const runtime = testTimeRuntime(1_050);
 		const faux = fauxProvider({ runtime });

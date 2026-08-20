@@ -78,32 +78,80 @@ describe("MCP application composition", () => {
 				},
 			}),
 		);
+		const disabledPluginRoot = join(homeDirectory, ".agents", "plugins", "disabled-docs");
+		await mkdir(disabledPluginRoot, { recursive: true });
+		await writeFile(
+			join(disabledPluginRoot, "plugin.json"),
+			JSON.stringify({
+				$schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+				name: "disabled-docs",
+			}),
+		);
+		await writeFile(
+			join(disabledPluginRoot, "mcp.json"),
+			JSON.stringify({
+				$schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+				mcpServers: {
+					docs: { type: "streamable-http", url: "https://disabled.example.test/mcp" },
+				},
+			}),
+		);
 		const runtime = testTimeRuntime(500);
 		const faux = fauxProvider({ runtime });
 		faux.setResponses([
 			(context) => {
 				expect(context.systemPrompt).toContain("Review through the Agent Plugin");
+				expect(context.systemPrompt).toContain("<plugins_instructions>");
+				expect(context.systemPrompt).toContain("A plugin is a local bundle of skills, MCP servers, and apps.");
 				return fauxAssistantMessage("plugin skill available before MCP trust", { timestamp: 500 });
 			},
 			(context) => {
 				expect(context.systemPrompt).toContain("Review through the Agent Plugin");
-				return fauxAssistantMessage("plugin MCP trusted", { timestamp: 500 });
+				expect(context.systemPrompt).toContain("<plugins_instructions>");
+				expect(context.tools?.some(({ name }) => name === "mcp__plugin_review-tools_local__review")).toBe(true);
+				return fauxAssistantMessage(
+					fauxToolCall(
+						"mcp__plugin_review-tools_local__review",
+						{ target: "workspace" },
+						{ id: "provider-plugin-review-call" },
+					),
+					{ stopReason: "toolUse", timestamp: 500 },
+				);
 			},
+			fauxAssistantMessage("plugin MCP trusted", { timestamp: 500 }),
 		]);
 		const models = createModels({ runtime });
 		models.setProvider(faux.provider);
-		let settings: UserSettings = {};
-		const definitions: Parameters<McpConnector["connect"]>[0][] = [];
-		const connection: McpConnection = {
-			info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
-			listTools: async () => [],
-			callTool: async () => ({ isError: false, content: [] }),
-			close: async () => undefined,
+		let settings: UserSettings = {
+			plugins: { "disabled-docs@user-local": { enabled: false } },
 		};
+		const definitions: Parameters<McpConnector["connect"]>[0][] = [];
+		const calls: Array<{ readonly serverId: string; readonly request: unknown }> = [];
 		const connector: McpConnector = {
 			connect: async (definition) => {
 				definitions.push(definition);
-				return connection;
+				return {
+					info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+					listTools: async () =>
+						definition.id === "plugin_review-tools_local"
+							? [
+									{
+										name: "review",
+										description: "Review the Workspace",
+										inputSchema: {
+											type: "object",
+											properties: { target: { type: "string" } },
+											required: ["target"],
+										},
+									},
+								]
+							: [],
+					callTool: async (request) => {
+						calls.push({ serverId: definition.id, request });
+						return { isError: false, content: [{ type: "text", text: "review complete" }] };
+					},
+					close: async () => undefined,
+				};
 			},
 		};
 		const stdout = new BufferOutput();
@@ -136,6 +184,7 @@ describe("MCP application composition", () => {
 
 		expect(definitions).toEqual([
 			expect.objectContaining({
+				semanticName: "remote-docs:docs",
 				protocol: "auto",
 				transport: { kind: "http", url: "https://docs.example.test/mcp" },
 			}),
@@ -144,14 +193,23 @@ describe("MCP application composition", () => {
 		expect(stderr.value).toContain("untrusted");
 
 		stderr.value = "";
-		await expect(application.run(["--print", "--model", model, "--trust-project-mcp", "review again"])).resolves.toBe(
-			0,
-		);
+		const trustedExitCode = await application.run([
+			"--print",
+			"--model",
+			model,
+			"--trust-project-mcp",
+			"review again",
+		]);
+		expect(trustedExitCode).toBe(0);
 
 		expect(definitions).toHaveLength(3);
+		expect(definitions).not.toContainEqual(
+			expect.objectContaining({ transport: { kind: "http", url: "https://disabled.example.test/mcp" } }),
+		);
 		const stdioDefinition = definitions.find(({ transport }) => transport.kind === "stdio");
 		expect(stdioDefinition).toMatchObject({
-			id: expect.stringMatching(/^plugin_[a-f0-9]{56}$/u),
+			id: "plugin_review-tools_local",
+			semanticName: "review-tools:local",
 			protocol: "auto",
 			transport: {
 				kind: "stdio",
@@ -178,9 +236,15 @@ describe("MCP application composition", () => {
 				},
 			],
 		});
+		expect(calls).toEqual([
+			{
+				serverId: "plugin_review-tools_local",
+				request: { name: "review", arguments: { target: "workspace" } },
+			},
+		]);
 	});
 
-	it("discovers an MCP Tool, admits it after a `$` mention, and returns its result", async () => {
+	it("discovers, exposes, and calls an MCP Tool without a `$` mention", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-mcp-application-"));
 		temporaryDirectories.push(workspace);
 		const runtime = testTimeRuntime(500);
@@ -249,7 +313,7 @@ describe("MCP application composition", () => {
 			"--print",
 			"--model",
 			`${faux.getModel().provider}/${faux.getModel().id}`,
-			"Use $search to look up MCP",
+			"Look up MCP in the external docs",
 		]);
 		expect({ exitCode, stderr: stderr.value }).toEqual({ exitCode: 0, stderr: "" });
 		expect(stdout.value).toBe("used external docs\n");
@@ -257,15 +321,15 @@ describe("MCP application composition", () => {
 		expect(faux.state.callCount).toBe(2);
 	});
 
-	it("does not freeze MCP Tools into a Run without a `$` mention", async () => {
+	it("freezes ready MCP Tools into a Run without requiring a `$` mention", async () => {
 		const workspace = await mkdtemp(join(tmpdir(), "coda-mcp-application-absent-"));
 		temporaryDirectories.push(workspace);
 		const runtime = testTimeRuntime(500);
 		const faux = fauxProvider({ runtime });
 		faux.setResponses([
 			(context) => {
-				expect(context.tools?.some(({ name }) => name.startsWith("mcp__"))).toBe(false);
-				return fauxAssistantMessage("CODA_MCP_ABSENT", { timestamp: 500 });
+				expect(context.tools?.some(({ name }) => name === "mcp__docs__search")).toBe(true);
+				return fauxAssistantMessage("CODA_MCP_VISIBLE", { timestamp: 500 });
 			},
 		]);
 		const models = createModels({ runtime });
@@ -326,6 +390,6 @@ describe("MCP application composition", () => {
 			"search docs",
 		]);
 		expect({ exitCode, stderr: stderr.value }).toEqual({ exitCode: 0, stderr: "" });
-		expect(stdout.value).toBe("CODA_MCP_ABSENT\n");
+		expect(stdout.value).toBe("CODA_MCP_VISIBLE\n");
 	});
 });

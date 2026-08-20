@@ -84,7 +84,58 @@ function context(baseTools: readonly RunToolContribution[] = []) {
 	};
 }
 
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((settle) => {
+		resolve = settle;
+	});
+	return { promise, resolve };
+}
+
 describe("RunCapabilityHost Interface", () => {
+	it("merges inherited selections per source while defaulting explicit child values to override", () => {
+		const mcp = {
+			...source("mcp"),
+			mergeSelection: (parent: unknown, child: unknown) => ({
+				toolIds: [
+					...new Set([
+						...((parent as { toolIds?: string[] } | undefined)?.toolIds ?? []),
+						...((child as { toolIds?: string[] } | undefined)?.toolIds ?? []),
+					]),
+				],
+			}),
+		} as unknown as RunCapabilitySource;
+		const host = createRunCapabilityHost({
+			model: modelSource(),
+			contributors: [mcp, source("hooks"), source("skills")],
+			now: () => 0,
+			platform: "linux",
+			interactionMode: "evaluation",
+		});
+
+		const merged = (
+			host as unknown as {
+				mergeSelections(parent: unknown, child: unknown): unknown;
+			}
+		).mergeSelections(
+			{
+				mcp: { toolIds: ["mcp:docs:a"] },
+				hooks: { policy: "parent" },
+				skills: { snapshot: "parent" },
+			},
+			{
+				mcp: { toolIds: ["mcp:docs:b"] },
+				hooks: { policy: "child" },
+			},
+		);
+
+		expect(merged).toEqual({
+			mcp: { toolIds: ["mcp:docs:a", "mcp:docs:b"] },
+			hooks: { policy: "child" },
+			skills: { snapshot: "parent" },
+		});
+	});
+
 	it("assembles trusted sources deterministically and disposes every resource exactly once", async () => {
 		const disposals = { model: 0, alpha: 0, zeta: 0 };
 		const host = createRunCapabilityHost({
@@ -127,6 +178,94 @@ describe("RunCapabilityHost Interface", () => {
 
 		await expect(host.acquire(context())).rejects.toThrow("source failed");
 		expect({ modelDisposals, sourceDisposals }).toEqual({ modelDisposals: 1, sourceDisposals: 1 });
+	});
+
+	it("memoizes one Run-scoped resource across independent capability sources", async () => {
+		let creations = 0;
+		let disposals = 0;
+		const sharedKey = Object.freeze({ kind: "project-bundle" });
+		const observed: unknown[] = [];
+		const sharedSource = (id: string): RunCapabilitySource => ({
+			id,
+			acquire: async ({ scope }) => {
+				const bundle = await scope!.getOrCreate(
+					sharedKey,
+					async () => {
+						creations++;
+						return Object.freeze({ revision: "project:7" });
+					},
+					() => {
+						disposals++;
+					},
+				);
+				observed.push(bundle);
+				return Object.freeze({
+					revision: bundle.revision,
+					tools: Object.freeze([]),
+					promptFragments: Object.freeze([]),
+					dispose: () => undefined,
+				});
+			},
+		});
+		const host = createRunCapabilityHost({
+			model: modelSource(),
+			contributors: [sharedSource("plugins"), sharedSource("skills"), sharedSource("mcp")],
+			now: () => 0,
+			platform: "linux",
+			interactionMode: "evaluation",
+		});
+
+		const lease = await host.acquire(context());
+
+		expect(creations).toBe(1);
+		expect(observed).toHaveLength(3);
+		expect(observed[0]).toBe(observed[1]);
+		expect(observed[1]).toBe(observed[2]);
+		await Promise.all([lease.dispose(), lease.dispose()]);
+		expect(disposals).toBe(1);
+	});
+
+	it("cancels without waiting for a pending scoped resource and disposes it when it arrives", async () => {
+		const started = deferred();
+		const release = deferred();
+		const disposed = deferred();
+		const controller = new AbortController();
+		let scopedDisposals = 0;
+		const host = createRunCapabilityHost({
+			model: modelSource(),
+			contributors: [
+				{
+					id: "project",
+					acquire: async ({ scope }) => {
+						await scope!.getOrCreate(
+							"project",
+							async () => {
+								started.resolve();
+								await release.promise;
+								return Object.freeze({ revision: 1 });
+							},
+							() => {
+								scopedDisposals++;
+								disposed.resolve();
+							},
+						);
+						return { revision: "project:1", tools: [], promptFragments: [], dispose: () => undefined };
+					},
+				},
+			],
+			now: () => 0,
+			platform: "linux",
+			interactionMode: "evaluation",
+		});
+		const acquisition = host.acquire({ ...context(), signal: controller.signal });
+		await started.promise;
+		controller.abort(new DOMException("canceled", "AbortError"));
+
+		await expect(acquisition).rejects.toThrow("canceled");
+		expect(scopedDisposals).toBe(0);
+		release.resolve();
+		await disposed.promise;
+		expect(scopedDisposals).toBe(1);
 	});
 
 	it("disposes a late resource after canceled acquisition without delaying cancellation", async () => {

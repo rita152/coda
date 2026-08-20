@@ -6,6 +6,8 @@ export interface McpStdioTransportDefinition {
 	readonly args?: readonly string[];
 	readonly cwd?: string;
 	readonly environment?: Readonly<Record<string, string>>;
+	/** Runtime-only final admission guard. It is never part of persisted MCP configuration or identity. */
+	readonly beforeLaunch?: (signal?: AbortSignal) => Promise<void>;
 }
 
 export interface McpHttpTransportDefinition {
@@ -22,6 +24,8 @@ export interface McpToolFilter {
 
 export interface McpServerDefinition {
 	readonly id: string;
+	/** Stable user-facing identity; transport and lifecycle operations continue to use `id`. */
+	readonly semanticName?: string;
 	readonly protocol: McpProtocolPolicy;
 	readonly transport: McpStdioTransportDefinition | McpHttpTransportDefinition;
 	readonly enabled?: boolean;
@@ -185,6 +189,7 @@ export interface McpConnector {
 export interface McpToolDescriptor {
 	readonly id: string;
 	readonly serverId: string;
+	readonly serverSemanticName: string;
 	readonly remoteName: string;
 	readonly name: string;
 	readonly title?: string;
@@ -192,10 +197,12 @@ export interface McpToolDescriptor {
 	readonly inputSchema: McpJsonSchema;
 	readonly outputSchema?: McpJsonSchema;
 	readonly annotations?: Readonly<Record<string, unknown>>;
+	readonly meta?: Readonly<Record<string, unknown>>;
 }
 
 export interface McpServerSnapshot {
 	readonly id: string;
+	readonly semanticName: string;
 	readonly status: "ready" | "degraded" | "disabled";
 	readonly protocolEra?: "modern" | "legacy";
 	readonly protocolVersion?: string;
@@ -206,6 +213,7 @@ export interface McpServerSnapshot {
 
 export interface McpDiagnostic {
 	readonly serverId: string;
+	readonly serverSemanticName: string;
 	readonly code: string;
 	readonly message: string;
 	readonly toolName?: string;

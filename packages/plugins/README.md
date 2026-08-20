@@ -32,6 +32,7 @@ base environment, and platform semantics:
 
 ```ts
 const materialized = await snapshot.materializeMcp({
+	dataRoot,
 	dataDirectory,
 	baseEnvironment,
 	platform: process.platform,
@@ -40,17 +41,26 @@ const materialized = await snapshot.materializeMcp({
 ```
 
 Materialization expands only `${PLUGIN_ROOT}` and `${PLUGIN_DATA}` in `args`, `env` values, and `cwd`, overlays and
-forces the reserved environment entries, and rechecks filesystem-resolved containment for plugin commands and
-working directories. It never launches a process or opens a network connection. Legacy HTTP+SSE entries are
-reported and skipped; stdio and Streamable HTTP entries are represented through the existing `@coda/mcp` transport
-definition seam.
+forces the reserved environment entries, and records filesystem identity leases for the Plugin root, client data
+directories, Plugin-relative executable, and configured working directory. It rechecks those leases before exposing
+each stdio definition. The stdio definition also carries a non-enumerable, runtime-only `beforeLaunch(signal?)`
+closure so `@coda/mcp` can recheck the same leases immediately before transport construction. The closure is not
+portable configuration and must not enter persistence, revision/hash input, or machine-readable output.
+
+Materialization never launches a process or opens a network connection. A launch-guard failure degrades only that
+stdio Server; HTTP and other valid siblings remain available. The guard closes deterministic application-level
+replacement windows but cannot eliminate the small guard-to-spawn window without an OS descriptor/`openat`-based
+launch primitive. Legacy HTTP+SSE entries are reported and skipped; stdio and Streamable HTTP entries are represented
+through the existing `@coda/mcp` transport definition seam.
 
 ## Bounds and authority
 
-Manifest and MCP configuration reads have conservative byte limits. Skill work uses one shared bounded
-`@coda/skills` runtime per `createPlugins` instance. Package paths are accepted only when their filesystem-resolved
-targets remain inside the canonical Plugin root, with the separately supplied Plugin data directory serving as the
-only additional `cwd` containment root.
+Manifest and MCP configuration reads have conservative byte limits. Package-wide immediate Skill scan and component
+budgets are applied before each accepted Skill child is loaded through an independent bounded `@coda/skills`
+snapshot, so per-root budget resets cannot bypass the package cap and exhausting one valid Skill subtree cannot
+suppress a sibling. Package paths are accepted only when their filesystem-resolved targets remain inside the
+canonical Plugin root, with the separately supplied Plugin data directory serving as the only additional `cwd`
+containment root.
 
 The package does not discover installation roots, choose workspace or user precedence, trust Plugin content, manage
 settings or persistent data, map capabilities into a Run lease, launch MCP transports, watch files, install from a

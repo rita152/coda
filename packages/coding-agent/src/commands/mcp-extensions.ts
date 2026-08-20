@@ -27,20 +27,22 @@ export function mcpToolsForCommandId(
 	return Object.freeze(toolId ? tools.filter((tool) => tool.id === toolId) : []);
 }
 
-/** Projects admitted MCP Tools into `$` Composer entries without auto-exposing them to the model. */
+/** Projects ready MCP Tools into `$` Composer entries as immutable presence assertions. */
 export function mcpExtensionEntries(snapshot: McpHostSnapshot): readonly CommandExtensionEntry[] {
 	const used = new Set<string>();
 	const entries: CommandExtensionEntry[] = [];
+	const servers = new Map(snapshot.servers.map((server) => [server.id, server]));
 	const serverIds = [...new Set(snapshot.tools.map((tool) => tool.serverId))].sort();
 	for (const serverId of serverIds) {
-		if (!isTriggerCompatibleName(serverId) || used.has(serverId)) continue;
-		used.add(serverId);
+		const semanticName = servers.get(serverId)?.semanticName ?? serverId;
+		if (!isTriggerCompatibleName(semanticName) || used.has(semanticName)) continue;
+		used.add(semanticName);
 		entries.push(
 			Object.freeze({
 				id: `${SERVER_COMMAND_PREFIX}${encodeURIComponent(serverId)}`,
-				name: serverId,
-				title: `${serverId} MCP Server`,
-				description: `Admit every Tool from MCP Server ${serverId} for this Run`,
+				name: semanticName,
+				title: `${semanticName} MCP Server`,
+				description: `Reference every Tool from MCP Server ${semanticName} and require it to remain available for this Run`,
 			}),
 		);
 	}
@@ -51,7 +53,7 @@ export function mcpExtensionEntries(snapshot: McpHostSnapshot): readonly Command
 			left.id.localeCompare(right.id),
 	);
 	for (const tool of tools) {
-		const name = [tool.remoteName, `${tool.serverId}-${tool.remoteName}`, tool.name].find(
+		const name = [tool.remoteName, `${tool.serverSemanticName}-${tool.remoteName}`, tool.name].find(
 			(candidate) => isTriggerCompatibleName(candidate) && !used.has(candidate),
 		);
 		if (!name) continue;

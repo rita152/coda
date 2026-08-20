@@ -35,8 +35,9 @@ async function fixture() {
 	const workspace = join(base, "workspace");
 	const home = join(base, "home");
 	await Promise.all([mkdir(workspace), mkdir(home)]);
+	await writeFile(join(workspace, ".git"), "gitdir: fake\n");
 	const fileSystem = createNodeFileSystem();
-	const roots = await collectSkillRoots({ workspace, homeDirectory: home });
+	const roots = await collectSkillRoots({ workspace, homeDirectory: home, fileSystem });
 	const manager = new CodingSkillsManager({ fileSystem, roots });
 	return { workspace, home, fileSystem, manager };
 }
@@ -83,8 +84,41 @@ describe("Skill activation context", () => {
 		]);
 		expect(context).toContain("First body");
 		expect(context).toContain("Second body");
-		expect(context).not.toContain("description: one workflow");
-		expect(context).toContain(String(one.candidate.revision));
+		expect(context).toContain(`<skill>\n<name>one</name>\n<path>${one.candidate.skillFile}</path>`);
+		expect(context).toContain("description: one workflow");
+		expect(context).not.toContain(String(one.candidate.revision));
+		expect(context).not.toContain("resources");
+	});
+
+	it("bounds injected Skill instructions to Codex's 8KB UTF-8 content limit", async () => {
+		const value = await fixture();
+		const body = `${"a".repeat(7_999)}étail`;
+		await writeSkill(join(value.home, ".agents", "skills"), "bounded", body);
+		const snapshot = await value.manager.refresh();
+		const resolved = snapshot.resolved[0]!;
+		const activation = await snapshot.activate(resolved.candidate.id);
+
+		const context = renderExplicitSkillContext([{ activation, resolved }]);
+		const injectedBody = context.match(/<path>[^\n]+<\/path>\n([\s\S]*?)\n<\/skill>/u)?.[1];
+		expect(new TextEncoder().encode(injectedBody).byteLength).toBe(8_000);
+		expect(injectedBody).not.toContain("é");
+	});
+
+	it("keeps the Plugin-qualified Skill name in structured Composer history", async () => {
+		const value = await fixture();
+		await writeSkill(join(value.home, ".agents", "skills"), "review", "Review body");
+		const snapshot = await value.manager.refresh();
+		const resolved = snapshot.resolved[0]!;
+		const activation = await snapshot.activate(resolved.candidate.id);
+		const pluginResolved = {
+			...resolved,
+			origin: { ...resolved.origin, kind: "plugin" as const, pluginName: "review-tools" },
+			qualifiedName: "review-tools:review",
+		};
+
+		expect(renderExplicitSkillReferences([{ activation, resolved: pluginResolved }])).toEqual([
+			{ type: "skill", name: "review-tools:review", path: resolved.candidate.skillFile },
+		]);
 	});
 
 	it("accepts the Codex-style $ Skill mention token for a structured reference", () => {

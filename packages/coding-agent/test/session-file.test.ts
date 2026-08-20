@@ -168,6 +168,45 @@ describe("JSONL File Session", () => {
 		await session.close();
 	});
 
+	it("restores a durable Follow-up with its exact Run capability selection", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-capability-selection-"));
+		temporaryDirectories.push(homeDirectory);
+		let id = 0;
+		const manager = new FileSessionManager({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			clock: { now: () => 1_170 },
+			idGenerator: { generate: (kind) => `${kind}:${++id}` },
+			owner: { token: "owner-token", pid: 123, processStartedAt: 1_000, hostname: "test-host" },
+			processInspector: { status: async () => "alive" },
+		});
+		const workspace = { id: "workspace-hash", path: "/canonical/workspace" };
+		const session = await manager.open({ workspace, mode: "interactive", persistent: true });
+		const queueItemId = "queue:capability" as QueueItemId;
+		const capabilitySelections = { mcp: { toolIds: ["mcp:docs:search"] } } as const;
+		await session.record({
+			type: "composer_submission_recorded",
+			submission: {
+				id: "submission:capability",
+				kind: "follow_up",
+				text: "Use $search",
+				queueItemId,
+				capabilitySelections,
+			},
+		});
+		await session.record({
+			type: "follow_up_enqueued",
+			item: { id: queueItemId, content: "Use $search" },
+		});
+		const sessionId = session.descriptor.id;
+		await session.close();
+
+		const restored = await manager.open({ workspace, mode: "interactive", resumeId: sessionId });
+		expect(restored.composerSubmissions).toEqual([expect.objectContaining({ queueItemId, capabilitySelections })]);
+		expect(restored.seed.pendingFollowUps).toEqual([{ id: queueItemId, content: "Use $search" }]);
+		await restored.close();
+	});
+
 	it("persists a generated Session Title and prefers it in the listing", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-session-title-"));
 		temporaryDirectories.push(homeDirectory);

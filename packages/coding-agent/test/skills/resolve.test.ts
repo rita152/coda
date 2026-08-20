@@ -21,12 +21,14 @@ describe("resolveSkillSelector", () => {
 		const home = join(base, "home");
 		const skillDirectory = join(home, ".agents", "skills", "inspect");
 		await Promise.all([mkdir(workspace, { recursive: true }), mkdir(skillDirectory, { recursive: true })]);
+		await writeFile(join(workspace, ".git"), "gitdir: fake\n");
 		await writeFile(
 			join(skillDirectory, "SKILL.md"),
 			"---\nname: inspect\ndescription: Inspect the current change\n---\n\nFollow the checklist.\n",
 		);
-		const roots = await collectSkillRoots({ workspace, homeDirectory: home });
-		const snapshot = await new CodingSkillsManager({ fileSystem: createNodeFileSystem(), roots }).refresh();
+		const fileSystem = createNodeFileSystem();
+		const roots = await collectSkillRoots({ workspace, homeDirectory: home, fileSystem });
+		const snapshot = await new CodingSkillsManager({ fileSystem, roots }).refresh();
 		const id = snapshot.resolved[0]!.candidate.id;
 		expect(resolveSkillSelector(snapshot, "inspect")?.candidate.id).toBe(id);
 		expect(resolveSkillSelector(snapshot, String(id))?.candidate.id).toBe(id);

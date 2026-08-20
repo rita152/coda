@@ -26,7 +26,7 @@ describe("Coding Agent Plugin MCP translation", () => {
 	it("maps materialized stdio and Streamable HTTP Servers onto native protocol definitions", async () => {
 		const workspace = await temporaryDirectory();
 		const userHome = await temporaryDirectory();
-		const dataRoot = join(await temporaryDirectory(), "plugin-data");
+		const dataRoot = join(await realpath(await temporaryDirectory()), "plugin-data");
 		const pluginRoot = join(workspace, ".agents", "plugins", "tools");
 		await mkdir(pluginRoot, { recursive: true });
 		await writeFile(
@@ -54,12 +54,14 @@ describe("Coding Agent Plugin MCP translation", () => {
 
 		const materialized = await materializeCodingPluginMcpDefinitions({
 			sources: inventory.mcpSources,
+			dataRoot: await realpath(dataRoot),
 			platform: process.platform,
 		});
 
 		expect(materialized.definitions).toEqual([
 			{
 				id: inventory.mcpSources[0]!.servers[0]!.id,
+				semanticName: "portable-tools:local",
 				protocol: "auto",
 				transport: {
 					kind: "stdio",
@@ -74,18 +76,24 @@ describe("Coding Agent Plugin MCP translation", () => {
 			},
 			{
 				id: inventory.mcpSources[0]!.servers[1]!.id,
+				semanticName: "portable-tools:remote",
 				protocol: "auto",
 				transport: { kind: "http", url: "https://example.test/mcp" },
 			},
 		]);
 		expect(materialized.diagnostics).toEqual([]);
 		expect(Object.isFrozen(materialized.definitions)).toBe(true);
+		const localTransport = materialized.definitions[0]?.transport;
+		if (!localTransport || localTransport.kind !== "stdio") throw new Error("expected Plugin stdio definition");
+		expect(localTransport.beforeLaunch).toEqual(expect.any(Function));
+		expect(Object.keys(localTransport)).not.toContain("beforeLaunch");
+		expect(JSON.stringify(materialized.definitions)).not.toContain("beforeLaunch");
 	});
 
 	it("isolates a generated Server id collision without suppressing other Plugin Servers", async () => {
 		const workspace = await temporaryDirectory();
 		const userHome = await temporaryDirectory();
-		const dataRoot = join(await temporaryDirectory(), "plugin-data");
+		const dataRoot = join(await realpath(await temporaryDirectory()), "plugin-data");
 		const pluginRoot = join(userHome, ".agents", "plugins", "remote-tools");
 		await mkdir(pluginRoot, { recursive: true });
 		await writeFile(
@@ -112,6 +120,7 @@ describe("Coding Agent Plugin MCP translation", () => {
 
 		const materialized = await materializeCodingPluginMcpDefinitions({
 			sources: inventory.mcpSources,
+			dataRoot,
 			platform: process.platform,
 			reservedServerIds: [collision.id],
 		});
@@ -132,7 +141,7 @@ describe("Coding Agent Plugin MCP translation", () => {
 	it("isolates an unavailable stdio data directory without hiding HTTP siblings or healthy sources", async () => {
 		const workspace = await temporaryDirectory();
 		const userHome = await temporaryDirectory();
-		const dataRoot = join(await temporaryDirectory(), "plugin-data");
+		const dataRoot = join(await realpath(await temporaryDirectory()), "plugin-data");
 		for (const [slot, server] of [
 			[
 				"bad",
@@ -163,17 +172,20 @@ describe("Coding Agent Plugin MCP translation", () => {
 
 		const materialized = await materializeCodingPluginMcpDefinitions({
 			sources: inventory.mcpSources,
+			dataRoot,
 			platform: process.platform,
 		});
 
 		expect(materialized.definitions).toEqual([
 			{
 				id: inventory.mcpSources[0]!.servers[1]!.id,
+				semanticName: "bad-tools:remote",
 				protocol: "auto",
 				transport: { kind: "http", url: "https://bad.example.test/mcp" },
 			},
 			{
 				id: inventory.mcpSources[1]!.servers[0]!.id,
+				semanticName: "good-tools:remote",
 				protocol: "auto",
 				transport: { kind: "http", url: "https://example.test/mcp" },
 			},

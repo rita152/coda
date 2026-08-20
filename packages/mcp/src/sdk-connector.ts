@@ -548,11 +548,16 @@ export function createSdkMcpConnector(options: SdkMcpConnectorOptions = {}): Mcp
 			});
 			client.onerror = (error) => options.onError?.(definition.id, error);
 			client.onclose = () => context?.onClose?.();
-			const transport =
-				definition.transport.kind === "http"
-					? httpTransport(definition, options.fetch)
-					: stdioTransport(definition, limits, options.onStderr);
 			try {
+				if (definition.transport.kind === "stdio") {
+					context?.signal?.throwIfAborted();
+					await definition.transport.beforeLaunch?.(context?.signal);
+					context?.signal?.throwIfAborted();
+				}
+				const transport =
+					definition.transport.kind === "http"
+						? httpTransport(definition, options.fetch)
+						: stdioTransport(definition, limits, options.onStderr);
 				await client.connect(transport, {
 					...(context?.signal ? { signal: context.signal } : {}),
 					timeout: limits.connectTimeoutMs,

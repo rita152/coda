@@ -121,11 +121,10 @@ describe("Skills loader", () => {
 
 	it("treats non-standard files as ordinary resources and activates an exact SKILL.md revision lazily", async () => {
 		const root = await temporaryDirectory();
-		const directory = await writeSkill(
-			root,
-			"review",
-			["---", "name: review", "description: Review a change", "---", "Use the checklist.", ""].join("\n"),
+		const source = ["---", "name: review", "description: Review a change", "---", "Use the checklist.", ""].join(
+			"\n",
 		);
+		const directory = await writeSkill(root, "review", source);
 		await mkdir(join(directory, "agents"));
 		await writeFile(
 			join(directory, "agents", "openai.yaml"),
@@ -150,6 +149,7 @@ describe("Skills loader", () => {
 		expect(activated).toMatchObject({
 			ok: true,
 			activation: {
+				contents: source,
 				body: "Use the checklist.\n",
 				arguments: "inspect main",
 				resources: ["agents/openai.yaml", "references/checklist.md"],

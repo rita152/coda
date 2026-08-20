@@ -349,7 +349,7 @@ export const CODA_CAPABILITY_CONTRACT = Object.freeze([
 		status: "runtime-supported",
 		title: "MCP Host",
 		summary:
-			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, mention-gated Run admission, progress, cancellation, subscriptions, and form or URL Elicitation.",
+			"MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, direct immutable per-Run exposure, Agent Plugin model-spec budgets, progress, cancellation, subscriptions, and form or URL Elicitation.",
 		sources: [
 			"packages/mcp/src/host.ts",
 			"packages/coding-agent/src/mcp/registry.ts",

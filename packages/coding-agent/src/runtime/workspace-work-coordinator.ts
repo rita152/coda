@@ -9,6 +9,7 @@ import {
 	type ModelDriverLease,
 	type OpenCodingAgentOptions,
 	openCodingAgent,
+	type RunCapabilitySource,
 	type RunModelSelection,
 	type RuntimeScheduler,
 	type RuntimeTime,
@@ -21,7 +22,11 @@ import type { ProcessRunner } from "../host/process-runner.ts";
 import type { HostProcessRuntime } from "../host/runtime.ts";
 import { createWorkspace, type Workspace } from "../host/workspace.ts";
 import type { CodingMcpRegistry } from "../mcp/registry.ts";
-import { createMcpCapabilitySource, type McpAgentElicitation } from "../mcp/run-capability.ts";
+import {
+	createMcpCapabilitySource,
+	type McpAgentElicitation,
+	type McpRunExposureDiagnostic,
+} from "../mcp/run-capability.ts";
 import type { ProcessSessionManager } from "../process/process-session-manager.ts";
 import type { Session } from "../session/types.ts";
 import type { SessionHistoryReadPort } from "../session-history/reader.ts";
@@ -33,6 +38,7 @@ import { TargetMutationCoordinator } from "../tools/mutation.ts";
 import { unavailableWebRuntime, type WebRuntime } from "../tools/web/runtime.ts";
 import { createDirectWorkspaceExecution } from "./direct-workspace-execution.ts";
 import { createGitWorktreeWorkspaceExecution } from "./git-worktree-workspace-execution.ts";
+import type { AcquireProjectRunCapabilityBundle } from "./project-capability-bundle.ts";
 import { SessionWorkController, type SessionWorkHost, type SessionWorkSelection } from "./session-work-controller.ts";
 
 type WorkSession = Awaited<ReturnType<OpenCodingAgentOptions["sessions"]["reserve"]>>["session"];
@@ -219,7 +225,10 @@ export function createWorkspaceWorkCoordinator(options: {
 	readonly shellExecutable: string;
 	readonly hostRuntime: HostProcessRuntime;
 	readonly skillsManager: CodingSkillsManager;
+	readonly projectCapabilities?: AcquireProjectRunCapabilityBundle;
+	readonly pluginCapabilitySource?: RunCapabilitySource;
 	readonly mcpRegistry?: CodingMcpRegistry;
+	readonly mcpDiagnostic?: (diagnostic: McpRunExposureDiagnostic) => void | Promise<void>;
 	readonly models: Models;
 	readonly clock: Clock;
 	readonly idGenerator: IdGenerator;
@@ -388,20 +397,29 @@ export function createWorkspaceWorkCoordinator(options: {
 			});
 		},
 	};
+	const projectCapabilitySources = options.projectCapabilities
+		? [createSkillsCapabilitySource({ acquireProjectBundle: options.projectCapabilities })]
+		: [createSkillsCapabilitySource(options.skillsManager)];
 	const capabilitySources = [
-		createSkillsCapabilitySource(options.skillsManager),
+		...projectCapabilitySources,
+		...(options.pluginCapabilitySource ? [options.pluginCapabilitySource] : []),
 		createMcpCapabilitySource({
-			acquire: async (signal) => {
-				if (!options.mcpRegistry) return emptyMcpLease();
-				await options.mcpRegistry.refresh({ signal });
-				if (signal.aborted) throw signal.reason ?? new DOMException("MCP acquisition aborted", "AbortError");
-				return options.mcpRegistry.acquireTools();
-			},
-			selectedToolIds: () => options.mcpRegistry?.selectedToolIds() ?? new Set(),
+			...(options.projectCapabilities
+				? { acquireProjectBundle: options.projectCapabilities }
+				: {
+						acquire: async (signal: AbortSignal) => {
+							if (!options.mcpRegistry) return emptyMcpLease();
+							await options.mcpRegistry.refresh({ signal });
+							if (signal.aborted)
+								throw signal.reason ?? new DOMException("MCP acquisition aborted", "AbortError");
+							return options.mcpRegistry.acquireTools();
+						},
+					}),
 			elicit: async (request) => {
 				const owner = sessionByRun.get(String(request.execution.runId));
 				return elicitationHandlerFor(owner)?.(request) ?? { action: "decline" };
 			},
+			...(options.mcpDiagnostic ? { diagnostic: options.mcpDiagnostic } : {}),
 		}),
 	];
 	const systemTime = createWorkspaceRuntimeTime(options.clock, options.scheduler);

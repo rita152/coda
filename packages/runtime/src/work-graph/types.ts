@@ -41,6 +41,18 @@ export interface DesiredRuntimeConfigurationPatch {
 	readonly runLimits?: RunLimits;
 }
 
+/** JSON-compatible, immutable capability input captured before a Run is prepared. */
+export type RunCapabilitySelectionValue =
+	| null
+	| boolean
+	| number
+	| string
+	| readonly RunCapabilitySelectionValue[]
+	| { readonly [key: string]: RunCapabilitySelectionValue };
+
+/** Immutable, source-addressed input captured for one Prepared Run. */
+export type RunCapabilitySelections = Readonly<Record<string, RunCapabilitySelectionValue>>;
+
 export type WorkSessionTarget =
 	| { readonly type: "create"; readonly sessionId?: string }
 	| { readonly type: "resume"; readonly sessionId: string };
@@ -83,6 +95,7 @@ export interface DeliverWorkItemInput {
 	readonly kind: WorkItemInputKind;
 	readonly input: AgentInput;
 	readonly resources?: readonly string[];
+	readonly capabilitySelections?: RunCapabilitySelections;
 }
 
 export interface ConfigureWorkItem {

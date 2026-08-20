@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0064
 ---
 
 # Admit MCP Tools only through explicit `$` mentions

@@ -17,6 +17,8 @@ export interface CommandFlowMenuItem {
 export interface CommandFlowMenu {
 	readonly id: string;
 	readonly title: string;
+	/** Called when this frame is popped, replaced, or closed. */
+	readonly onDismiss?: () => void;
 	readonly filterable?: boolean;
 	readonly presentation?: "default" | "sessions";
 	readonly emptyMessage?: string;
@@ -26,6 +28,8 @@ export interface CommandFlowMenu {
 export interface CommandFlowPrompt {
 	readonly id: string;
 	readonly title: string;
+	/** Called when this frame is popped, replaced, or closed. */
+	readonly onDismiss?: () => void;
 	readonly label: string;
 	readonly placeholder?: string;
 	readonly secret?: boolean;

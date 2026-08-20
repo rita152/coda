@@ -14,7 +14,7 @@ interface ExtensionMarkerValue {
 
 export function addExtensionReference(
 	editor: Editor,
-	command: CommandDefinition,
+	command: Pick<CommandDefinition, "id" | "name" | "source">,
 	start: number,
 	end: number,
 ): ComposerExtensionReference {

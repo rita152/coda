@@ -1,8 +1,16 @@
 import { isAbsolute, join, relative, sep } from "node:path";
-import type { SkillDirectoryEntry, SkillFileSystem, SkillRoot, Skills, SkillsSnapshot } from "@coda/skills";
+import type {
+	SkillDiagnostic,
+	SkillDirectoryEntry,
+	SkillFileSystem,
+	SkillRoot,
+	Skills,
+	SkillsSnapshot,
+} from "@coda/skills";
 import { createSkills } from "@coda/skills";
 import { materializePluginMcp } from "./materialize.ts";
 import { loadPluginMcp } from "./mcp-config.ts";
+import { containsReservedCodexPluginComponent, guardReservedCodexPluginPaths } from "./reserved-path.ts";
 import type {
 	CreatePluginsOptions,
 	LoadedPluginSnapshot,
@@ -63,35 +71,6 @@ function manifestFrom<Origin>(
 	diagnostics: PluginDiagnostic<Origin>[],
 ): PluginManifest {
 	if (!isRecord(value)) throw new Error("plugin.json must contain a JSON object");
-	if (value.$schema !== AGENT_PLUGIN_SCHEMA)
-		throw new Error("plugin.json targets an unsupported Agent Plugins version");
-	if (
-		typeof value.name !== "string" ||
-		value.name.length > 64 ||
-		!/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(value.name)
-	) {
-		throw new Error("plugin.json name must satisfy the Agent Plugins name constraints");
-	}
-	let author: PluginManifest["author"];
-	if (value.author !== undefined) {
-		if (!isRecord(value.author)) throw new Error("plugin.json author must be an object");
-		const unknown = Object.keys(value.author).find((field) => !["name", "email", "url"].includes(field));
-		if (unknown) throw new Error(`plugin.json author contains an unknown field: ${unknown}`);
-		author = Object.freeze({
-			...(optionalString(value.author, "name") !== undefined ? { name: optionalString(value.author, "name") } : {}),
-			...(optionalString(value.author, "email") !== undefined
-				? { email: optionalString(value.author, "email") }
-				: {}),
-			...(optionalString(value.author, "url") !== undefined ? { url: optionalString(value.author, "url") } : {}),
-		});
-	}
-	let keywords: readonly string[] | undefined;
-	if (value.keywords !== undefined) {
-		if (!Array.isArray(value.keywords) || value.keywords.some((entry) => typeof entry !== "string")) {
-			throw new Error("plugin.json keywords must be an array of strings");
-		}
-		keywords = Object.freeze([...value.keywords]);
-	}
 	if (value.extensions !== undefined && !isRecord(value.extensions)) {
 		diagnostics.push(
 			manifestDiagnostic(
@@ -115,17 +94,50 @@ function manifestFrom<Origin>(
 			),
 		);
 	}
+	if (value.$schema !== AGENT_PLUGIN_SCHEMA)
+		throw new Error("plugin.json targets an unsupported Agent Plugins version");
+	if (
+		typeof value.name !== "string" ||
+		value.name.length > 64 ||
+		!/^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(value.name)
+	) {
+		throw new Error("plugin.json name must satisfy the Agent Plugins name constraints");
+	}
+	let author: PluginManifest["author"];
+	if (value.author !== undefined) {
+		if (!isRecord(value.author)) throw new Error("plugin.json author must be an object");
+		const unknown = Object.keys(value.author).find((field) => !["name", "email", "url"].includes(field));
+		if (unknown) throw new Error(`plugin.json author contains an unknown field: ${unknown}`);
+		const name = optionalString(value.author, "name");
+		const email = optionalString(value.author, "email");
+		const url = optionalString(value.author, "url");
+		author = Object.freeze({
+			...(name !== undefined ? { name } : {}),
+			...(email !== undefined ? { email } : {}),
+			...(url !== undefined ? { url } : {}),
+		});
+	}
+	let keywords: readonly string[] | undefined;
+	if (value.keywords !== undefined) {
+		if (!Array.isArray(value.keywords) || value.keywords.some((entry) => typeof entry !== "string")) {
+			throw new Error("plugin.json keywords must be an array of strings");
+		}
+		keywords = Object.freeze([...value.keywords]);
+	}
+	const version = optionalString(value, "version");
+	const description = optionalString(value, "description");
+	const homepage = optionalString(value, "homepage");
+	const repository = optionalString(value, "repository");
+	const license = optionalString(value, "license");
 	return Object.freeze({
 		$schema: AGENT_PLUGIN_SCHEMA,
 		name: value.name,
-		...(optionalString(value, "version") !== undefined ? { version: optionalString(value, "version") } : {}),
-		...(optionalString(value, "description") !== undefined
-			? { description: optionalString(value, "description") }
-			: {}),
+		...(version !== undefined ? { version } : {}),
+		...(description !== undefined ? { description } : {}),
 		...(author ? { author } : {}),
-		...(optionalString(value, "homepage") !== undefined ? { homepage: optionalString(value, "homepage") } : {}),
-		...(optionalString(value, "repository") !== undefined ? { repository: optionalString(value, "repository") } : {}),
-		...(optionalString(value, "license") !== undefined ? { license: optionalString(value, "license") } : {}),
+		...(homepage !== undefined ? { homepage } : {}),
+		...(repository !== undefined ? { repository } : {}),
+		...(license !== undefined ? { license } : {}),
 		...(keywords ? { keywords } : {}),
 	});
 }
@@ -155,13 +167,43 @@ function componentDiagnostic<Origin>(
 	message: string,
 	path: string,
 	severity: PluginDiagnostic<Origin>["severity"] = "warning",
+	componentName?: string,
 ): PluginDiagnostic<Origin> {
 	return Object.freeze({
 		code,
 		severity,
 		phase: "skill",
 		message,
+		...(componentName ? { componentName } : {}),
 		path,
+		pluginRoot: request.root,
+		origin: request.origin,
+	});
+}
+
+function stableSkillComponentName(name: string): string | undefined {
+	const normalized = name.normalize("NFC");
+	return normalized === name &&
+		name.length >= 1 &&
+		name.length <= 64 &&
+		/^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*$/u.test(name)
+		? name
+		: undefined;
+}
+
+function delegatedSkillDiagnostic<Origin>(
+	request: PluginLoadRequest<Origin>,
+	diagnostic: SkillDiagnostic<Origin>,
+	componentName: string | undefined,
+): PluginDiagnostic<Origin> {
+	return Object.freeze({
+		code: diagnostic.code,
+		severity: diagnostic.severity,
+		phase: "skill" as const,
+		message: diagnostic.message,
+		...(componentName ? { componentName } : {}),
+		...(diagnostic.path ? { path: diagnostic.path } : {}),
+		...(diagnostic.field ? { field: diagnostic.field } : {}),
 		pluginRoot: request.root,
 		origin: request.origin,
 	});
@@ -184,26 +226,22 @@ function diagnostic<Origin>(
 	});
 }
 
-async function canonicalDirectory(fileSystem: SkillFileSystem, path: string, label: string): Promise<string> {
-	const canonical = await fileSystem.realpath(path);
-	if ((await fileSystem.stat(canonical)).kind !== "directory") throw new TypeError(`${label} must be a directory`);
-	return canonical;
-}
-
 async function loadSkills<Origin>(options: {
 	readonly fileSystem: SkillFileSystem;
 	readonly skills: Skills<Origin>;
 	readonly request: PluginLoadRequest<Origin>;
 	readonly root: string;
+	readonly limits: Readonly<PluginLimits>;
 	readonly diagnostics: PluginDiagnostic<Origin>[];
 }): Promise<SkillsSnapshot<Origin>> {
-	const lexicalRoot = join(options.request.root, "skills");
+	const componentRoot = join(options.root, "skills");
+	const reportedRoot = join(options.request.root, "skills");
 	let present = false;
 	let canonicalRoot: string;
 	try {
-		await options.fileSystem.lstat(lexicalRoot);
+		await options.fileSystem.lstat(componentRoot);
 		present = true;
-		canonicalRoot = await options.fileSystem.realpath(lexicalRoot);
+		canonicalRoot = await options.fileSystem.realpath(componentRoot);
 		if (!isContained(options.root, canonicalRoot)) throw new Error("skills/ resolves outside the Plugin root");
 		if ((await options.fileSystem.stat(canonicalRoot)).kind !== "directory") {
 			throw new Error("skills/ is not a directory");
@@ -222,7 +260,7 @@ async function loadSkills<Origin>(options: {
 				options.request,
 				"skills-component-invalid",
 				`Could not load skills/: ${error instanceof Error ? error.message : String(error)}`,
-				lexicalRoot,
+				reportedRoot,
 			),
 		);
 		return options.skills.snapshot({
@@ -243,17 +281,43 @@ async function loadSkills<Origin>(options: {
 				options.request,
 				"skills-component-invalid",
 				`Could not read skills/: ${error instanceof Error ? error.message : String(error)}`,
-				lexicalRoot,
+				reportedRoot,
 			),
 		);
 		entries = [];
 	}
-	const roots: SkillRoot<Origin>[] = [];
-	for (const entry of entries) {
+	if (entries.length > options.limits.maxSkillScanEntries) {
+		options.diagnostics.push(
+			componentDiagnostic(
+				options.request,
+				"plugin-skill-scan-limit-exceeded",
+				`Plugin Skill discovery exceeds ${options.limits.maxSkillScanEntries} immediate entries`,
+				reportedRoot,
+				"error",
+			),
+		);
+	}
+	const roots: { readonly componentName?: string; readonly root: SkillRoot<Origin> }[] = [];
+	let componentsSeen = 0;
+	for (const entry of entries.slice(0, options.limits.maxSkillScanEntries)) {
 		options.request.signal?.throwIfAborted();
 		if (entry.kind !== "directory" && entry.kind !== "symbolic-link") continue;
-		const skillDirectory = join(lexicalRoot, entry.name);
+		componentsSeen++;
+		if (componentsSeen > options.limits.maxSkillComponents) {
+			options.diagnostics.push(
+				componentDiagnostic(
+					options.request,
+					"plugin-skill-component-limit-exceeded",
+					`Plugin Skill component count exceeds ${options.limits.maxSkillComponents}`,
+					reportedRoot,
+					"error",
+				),
+			);
+			break;
+		}
+		const skillDirectory = join(componentRoot, entry.name);
 		const skillFile = join(skillDirectory, "SKILL.md");
+		const reportedSkillFile = join(reportedRoot, entry.name, "SKILL.md");
 		try {
 			const canonicalSkillDirectory = await options.fileSystem.realpath(skillDirectory);
 			if (!isContained(options.root, canonicalSkillDirectory)) {
@@ -273,9 +337,12 @@ async function loadSkills<Origin>(options: {
 			}
 			roots.push(
 				Object.freeze({
-					path: skillDirectory,
-					origin: options.request.origin,
-					symlinks: Object.freeze({ mode: "follow" as const, containmentRoot: options.root }),
+					...(stableSkillComponentName(entry.name) ? { componentName: entry.name } : {}),
+					root: Object.freeze({
+						path: skillDirectory,
+						origin: options.request.origin,
+						symlinks: Object.freeze({ mode: "follow" as const, containmentRoot: options.root }),
+					}),
 				}),
 			);
 		} catch (error) {
@@ -285,19 +352,55 @@ async function loadSkills<Origin>(options: {
 					options.request,
 					"plugin-skill-invalid",
 					`Skipped invalid Plugin Skill: ${error instanceof Error ? error.message : String(error)}`,
-					skillFile,
+					reportedSkillFile,
+					"warning",
+					stableSkillComponentName(entry.name),
 				),
 			);
 		}
 	}
-	return options.skills.snapshot({
-		roots: Object.freeze(roots),
-		profile: "strict",
-		signal: options.request.signal,
-	});
+	if (roots.length === 0) {
+		return options.skills.snapshot({
+			roots: [],
+			profile: "strict",
+			signal: options.request.signal,
+		});
+	}
+	const snapshots: SkillsSnapshot<Origin>[] = [];
+	for (const entry of roots) {
+		options.request.signal?.throwIfAborted();
+		const snapshot = await options.skills.snapshot({
+			roots: [entry.root],
+			profile: "strict",
+			signal: options.request.signal,
+		});
+		snapshots.push(snapshot);
+		options.diagnostics.push(
+			...snapshot.diagnostics.map((diagnostic) =>
+				delegatedSkillDiagnostic(options.request, diagnostic, entry.componentName),
+			),
+		);
+	}
+	const activationOwners = new Map<string, SkillsSnapshot<Origin>>();
+	const candidates = [];
+	for (const snapshot of snapshots) {
+		for (const candidate of snapshot.candidates) {
+			if (activationOwners.has(candidate.id)) continue;
+			activationOwners.set(candidate.id, snapshot);
+			candidates.push(candidate);
+		}
+	}
+	const firstSnapshot = snapshots[0]!;
+	const combined: SkillsSnapshot<Origin> = {
+		candidates: Object.freeze(candidates),
+		diagnostics: Object.freeze(snapshots.flatMap(({ diagnostics }) => diagnostics)),
+		activate: (id, activationOptions) => (activationOwners.get(id) ?? firstSnapshot).activate(id, activationOptions),
+	};
+	return Object.freeze(combined);
 }
 
 async function loadPlugin<Origin>(
+	rootFileSystem: SkillFileSystem,
 	fileSystem: SkillFileSystem,
 	skills: Skills<Origin>,
 	limits: Readonly<PluginLimits>,
@@ -315,9 +418,23 @@ async function loadPlugin<Origin>(
 		throw new TypeError("Plugin root must be absolute");
 	}
 	request.signal?.throwIfAborted();
+	if (containsReservedCodexPluginComponent(request.root)) {
+		const entry = diagnostic(
+			request,
+			"plugin-root-unsupported",
+			'Plugin roots inside ".codex-plugin" are outside the Agent Plugins protocol',
+			request.root,
+		);
+		return Object.freeze({
+			status: "rejected" as const,
+			requestedRoot: request.root,
+			origin: request.origin,
+			diagnostics: Object.freeze([entry]),
+		});
+	}
 	let root: string;
 	try {
-		root = await canonicalDirectory(fileSystem, request.root, "Plugin root");
+		root = await rootFileSystem.realpath(request.root);
 	} catch (error) {
 		request.signal?.throwIfAborted();
 		const entry = diagnostic(
@@ -333,7 +450,44 @@ async function loadPlugin<Origin>(
 			diagnostics: Object.freeze([entry]),
 		});
 	}
-	const manifestPath = join(request.root, "plugin.json");
+	if (containsReservedCodexPluginComponent(root)) {
+		const entry = diagnostic(
+			request,
+			"plugin-root-unsupported",
+			'Plugin roots resolving inside ".codex-plugin" are outside the Agent Plugins protocol',
+			root,
+		);
+		return Object.freeze({
+			status: "rejected" as const,
+			requestedRoot: request.root,
+			origin: request.origin,
+			diagnostics: Object.freeze([entry]),
+		});
+	}
+	let rootIdentity: { readonly device?: string; readonly inode?: string };
+	try {
+		const status = await fileSystem.lstat(root);
+		if (status.kind !== "directory") throw new TypeError("Plugin root must be a real directory");
+		rootIdentity = Object.freeze({
+			...(status.device === undefined ? {} : { device: status.device }),
+			...(status.inode === undefined ? {} : { inode: status.inode }),
+		});
+	} catch (error) {
+		request.signal?.throwIfAborted();
+		const entry = diagnostic(
+			request,
+			"plugin-root-invalid",
+			`Could not resolve Plugin root: ${String(error)}`,
+			request.root,
+		);
+		return Object.freeze({
+			status: "rejected" as const,
+			requestedRoot: request.root,
+			origin: request.origin,
+			diagnostics: Object.freeze([entry]),
+		});
+	}
+	const manifestPath = join(root, "plugin.json");
 	const diagnostics: PluginDiagnostic<Origin>[] = [];
 	let manifest: PluginManifest;
 	try {
@@ -355,30 +509,16 @@ async function loadPlugin<Origin>(
 			request,
 			"plugin-manifest-invalid",
 			`Could not load plugin.json: ${error instanceof Error ? error.message : String(error)}`,
-			manifestPath,
+			join(request.root, "plugin.json"),
 		);
 		return Object.freeze({
 			status: "rejected" as const,
 			requestedRoot: request.root,
 			origin: request.origin,
-			diagnostics: Object.freeze([entry]),
+			diagnostics: Object.freeze([...diagnostics, entry]),
 		});
 	}
-	const skillsSnapshot = await loadSkills({ fileSystem, skills, request, root, diagnostics });
-	diagnostics.push(
-		...skillsSnapshot.diagnostics.map((entry) =>
-			Object.freeze({
-				code: entry.code,
-				severity: entry.severity,
-				phase: "skill" as const,
-				message: entry.message,
-				...(entry.path ? { path: entry.path } : {}),
-				...(entry.field ? { field: entry.field } : {}),
-				pluginRoot: request.root,
-				origin: request.origin,
-			}),
-		),
-	);
+	const skillsSnapshot = await loadSkills({ fileSystem, skills, request, root, limits, diagnostics });
 	const mcp = await loadPluginMcp({
 		fileSystem,
 		request,
@@ -397,15 +537,18 @@ async function loadPlugin<Origin>(
 		mcpServers: mcp.servers,
 		...(mcp.configuration ? { mcpConfiguration: mcp.configuration } : {}),
 		diagnostics: Object.freeze(diagnostics),
-		materializeMcp: (options) => materializePluginMcp({ fileSystem, request, root, servers: mcp.servers, options }),
+		materializeMcp: (options) =>
+			materializePluginMcp({ fileSystem, request, root, rootIdentity, servers: mcp.servers, options }),
 	});
 }
 
 export function createPlugins<Origin = unknown>(options: CreatePluginsOptions): Plugins<Origin> {
 	if (!options || typeof options !== "object" || !options.fileSystem) throw new TypeError("fileSystem is required");
 	const limits = resolveLimits(options.limits);
-	const skills = createSkills<Origin>({ fileSystem: options.fileSystem });
+	const guardedFileSystem = guardReservedCodexPluginPaths(options.fileSystem);
+	const skills = createSkills<Origin>({ fileSystem: guardedFileSystem });
 	return Object.freeze({
-		load: (request: PluginLoadRequest<Origin>) => loadPlugin<Origin>(options.fileSystem, skills, limits, request),
+		load: (request: PluginLoadRequest<Origin>) =>
+			loadPlugin<Origin>(options.fileSystem, guardedFileSystem, skills, limits, request),
 	});
 }

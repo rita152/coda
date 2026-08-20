@@ -196,6 +196,9 @@ function persistedMcpDetails(value: unknown): unknown {
 		...(details.kind === "mcp" ? { kind: "mcp" } : {}),
 		...(typeof details.catalogRevision === "number" ? { catalogRevision: details.catalogRevision } : {}),
 		...(typeof details.serverId === "string" ? { serverId: details.serverId.slice(0, 64) } : {}),
+		...(typeof details.serverSemanticName === "string"
+			? { serverSemanticName: details.serverSemanticName.slice(0, 256) }
+			: {}),
 		...(typeof details.remoteToolName === "string" ? { remoteToolName: details.remoteToolName.slice(0, 256) } : {}),
 		...(Array.isArray(details.contentTypes)
 			? {

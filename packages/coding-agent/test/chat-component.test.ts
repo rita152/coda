@@ -408,6 +408,43 @@ describe("ChatComponent terminal input", () => {
 		expect(onSubmit).toHaveBeenCalledWith("Use $review", [], "Use $review", references);
 	});
 
+	it("prefills a Skill detail starter prompt as editable text without auto-submitting it", async () => {
+		const onResolveExtensionReferences = vi.fn(
+			async (_references: readonly ComposerExtensionReference[]) => undefined,
+		);
+		const onSubmit = vi.fn(async () => undefined);
+		const component = createComponent({ onSubmit, onResolveExtensionReferences });
+		const context: ComponentInputContext = { requestImmediateRender: vi.fn() };
+
+		component.prefillExtension({
+			text: "Use $review to review the selected change ",
+			commandId: "skill:review",
+			source: "skill",
+			name: "review",
+			start: 4,
+			end: 11,
+		});
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(stripAnsi(component.render({ width: 80, height: 14, now: 0 }).join("\n"))).toContain(
+			"Use $review to review the selected change",
+		);
+		component.handleInput({ type: "text", text: "carefully" }, context);
+		component.handleInput(key("enter"), context);
+
+		await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+		const references = onResolveExtensionReferences.mock.calls[0]![0];
+		expect(references).toMatchObject([
+			{ commandId: "skill:review", source: "skill", name: "review", start: 4, end: 11 },
+		]);
+		expect(onSubmit).toHaveBeenCalledWith(
+			"Use $review to review the selected change carefully",
+			[],
+			"Use $review to review the selected change carefully",
+			references,
+		);
+	});
+
 	it("keeps extension offsets aligned after removing attachment display brackets", async () => {
 		const onResolveExtensionReferences = vi.fn(
 			async (_references: readonly ComposerExtensionReference[]) => undefined,

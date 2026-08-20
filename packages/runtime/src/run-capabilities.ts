@@ -1,4 +1,4 @@
-import type { AgentTool, ToolExecutionContext, ToolExecutionOutput } from "@coda/agent";
+import { type AgentTool, cloneFrozen, type ToolExecutionContext, type ToolExecutionOutput } from "@coda/agent";
 import type {
 	Api,
 	AssistantMessage,
@@ -14,7 +14,12 @@ import {
 	type SystemPromptSnapshot,
 	type TrustedProjectInstructions,
 } from "./prompt/prompt-builder.ts";
-import type { WorkExecutionMode, WorkspacePlacementDescriptor } from "./work-graph/types.ts";
+import type {
+	RunCapabilitySelections,
+	RunCapabilitySelectionValue,
+	WorkExecutionMode,
+	WorkspacePlacementDescriptor,
+} from "./work-graph/types.ts";
 
 export type RunToolEffect = "read" | "write" | "unknown";
 
@@ -70,11 +75,30 @@ export interface RunCapabilityContributionLease {
 	dispose(): Promise<void> | void;
 }
 
+export interface RunCapabilityAcquisitionScope {
+	/**
+	 * Returns one immutable Run-scoped value for `key`. The first caller owns
+	 * construction and disposal; every later caller observes that exact value.
+	 */
+	getOrCreate<T>(
+		key: unknown,
+		create: () => T | PromiseLike<T>,
+		dispose?: (value: T) => Promise<void> | void,
+	): Promise<T>;
+}
+
 export interface RunCapabilitySource {
 	readonly id: string;
+	mergeSelection?(
+		parent: RunCapabilitySelectionValue | undefined,
+		child: RunCapabilitySelectionValue | undefined,
+	): RunCapabilitySelectionValue | undefined;
 	acquire(context: {
 		readonly model: Model<Api>;
 		readonly signal: AbortSignal;
+		readonly selection?: RunCapabilitySelections[string];
+		/** Present for host-driven acquisition; omitted only by direct legacy source tests/callers. */
+		readonly scope?: RunCapabilityAcquisitionScope;
 	}): RunCapabilityContributionLease | Promise<RunCapabilityContributionLease>;
 }
 
@@ -92,11 +116,16 @@ export interface RunCapabilityAcquireContext {
 	readonly mode: WorkExecutionMode;
 	readonly baseTools: readonly RunToolContribution[];
 	readonly bindTools: (contributions: readonly RunToolContribution[]) => readonly AgentTool[];
+	readonly capabilitySelections?: RunCapabilitySelections;
 	readonly signal: AbortSignal;
 	readonly deadline?: number;
 }
 
 export interface RunCapabilityHost {
+	mergeSelections(
+		parent: RunCapabilitySelections | undefined,
+		child: RunCapabilitySelections | undefined,
+	): RunCapabilitySelections | undefined;
 	acquire(context: RunCapabilityAcquireContext): Promise<RunCapabilityLease>;
 }
 
@@ -187,6 +216,67 @@ function createDisposer(resources: readonly { dispose(): Promise<void> | void }[
 	};
 }
 
+function createAcquisitionScope(): RunCapabilityAcquisitionScope & { dispose(): Promise<void> } {
+	interface Entry {
+		readonly operation: Promise<unknown>;
+		readonly dispose?: (value: unknown) => Promise<void> | void;
+		state: "pending" | "resolved" | "rejected";
+		value?: unknown;
+		disposed: boolean;
+	}
+	const entries = new Map<unknown, Entry>();
+	const ordered: Entry[] = [];
+	let closed = false;
+	const disposeEntry = (entry: Entry): Promise<void> => {
+		if (entry.disposed || entry.state !== "resolved") return Promise.resolve();
+		entry.disposed = true;
+		return Promise.resolve(entry.dispose?.(entry.value));
+	};
+	return Object.freeze({
+		getOrCreate: <T>(
+			key: unknown,
+			create: () => T | PromiseLike<T>,
+			dispose?: (value: T) => Promise<void> | void,
+		): Promise<T> => {
+			if (closed) return Promise.reject(new Error("Run capability acquisition scope is closed"));
+			const existing = entries.get(key);
+			if (existing) return existing.operation as Promise<T>;
+			const entry: Entry = {
+				operation: Promise.resolve().then(create),
+				...(dispose ? { dispose: dispose as (value: unknown) => Promise<void> | void } : {}),
+				state: "pending",
+				disposed: false,
+			};
+			entries.set(key, entry);
+			ordered.push(entry);
+			void entry.operation.then(
+				(value) => {
+					entry.state = "resolved";
+					entry.value = value;
+					if (closed) void disposeEntry(entry).catch(() => undefined);
+				},
+				() => {
+					entry.state = "rejected";
+				},
+			);
+			return entry.operation as Promise<T>;
+		},
+		dispose: async () => {
+			if (closed) return;
+			closed = true;
+			const results = await Promise.allSettled([...ordered].reverse().map(disposeEntry));
+			const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+			if (failures.length === 1) throw failures[0]!.reason;
+			if (failures.length > 1) {
+				throw new AggregateError(
+					failures.map(({ reason }) => reason),
+					"Run capability acquisition-scope disposal failed",
+				);
+			}
+		},
+	});
+}
+
 export function createRunCapabilityHost(options: CreateRunCapabilityHostOptions): RunCapabilityHost {
 	const contributors = [...options.contributors].sort((left, right) => compareText(left.id, right.id));
 	const contributorIds = new Set<string>();
@@ -196,8 +286,41 @@ export function createRunCapabilityHost(options: CreateRunCapabilityHostOptions)
 		}
 		contributorIds.add(contributor.id);
 	}
+	const sourceById = new Map(contributors.map((source) => [source.id, source] as const));
 	return Object.freeze({
+		mergeSelections: (
+			parent: RunCapabilitySelections | undefined,
+			child: RunCapabilitySelections | undefined,
+		): RunCapabilitySelections | undefined => {
+			if (!parent && !child) return undefined;
+			const inherited = parent ? (cloneFrozen(parent) as RunCapabilitySelections) : undefined;
+			const explicit = child ? (cloneFrozen(child) as RunCapabilitySelections) : undefined;
+			const merged: Record<string, RunCapabilitySelectionValue> = {};
+			const sourceIds = [...new Set([...Object.keys(inherited ?? {}), ...Object.keys(explicit ?? {})])].sort(
+				compareText,
+			);
+			for (const sourceId of sourceIds) {
+				const hasParent = inherited !== undefined && Object.hasOwn(inherited, sourceId);
+				const hasChild = explicit !== undefined && Object.hasOwn(explicit, sourceId);
+				const parentSelection = hasParent ? inherited[sourceId] : undefined;
+				const childSelection = hasChild ? explicit[sourceId] : undefined;
+				const mergeSelection = sourceById.get(sourceId)?.mergeSelection;
+				const value =
+					hasParent && hasChild
+						? mergeSelection
+							? mergeSelection(parentSelection, childSelection)
+							: childSelection
+						: hasChild
+							? childSelection
+							: parentSelection;
+				if (value !== undefined) merged[sourceId] = cloneFrozen(value) as RunCapabilitySelectionValue;
+			}
+			return cloneFrozen(merged) as RunCapabilitySelections;
+		},
 		acquire: async (context: RunCapabilityAcquireContext): Promise<RunCapabilityLease> => {
+			const capabilitySelections = context.capabilitySelections
+				? (cloneFrozen(context.capabilitySelections) as RunCapabilitySelections)
+				: undefined;
 			const resources: { dispose(): Promise<void> | void }[] = [];
 			try {
 				const model = await awaitResource(
@@ -207,13 +330,22 @@ export function createRunCapabilityHost(options: CreateRunCapabilityHostOptions)
 					options.now,
 				);
 				resources.push(model);
+				const scope = createAcquisitionScope();
+				resources.push(scope);
 				const contributions: Array<{
 					readonly source: RunCapabilitySource;
 					readonly lease: RunCapabilityContributionLease;
 				}> = [];
 				for (const source of contributors) {
 					const lease = await awaitResource(
-						source.acquire({ model: model.model, signal: context.signal }),
+						source.acquire({
+							model: model.model,
+							signal: context.signal,
+							scope,
+							...(capabilitySelections && source.id in capabilitySelections
+								? { selection: capabilitySelections[source.id] }
+								: {}),
+						}),
 						context.signal,
 						context.deadline,
 						options.now,

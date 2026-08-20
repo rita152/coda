@@ -20,6 +20,45 @@ export interface CodingSkillOrigin {
 	readonly pluginRoot?: string;
 }
 
+/** Validated Codex UI metadata from a Skill's optional `agents/openai.yaml`. */
+export interface CodingSkillInterfaceMetadata {
+	readonly displayName?: string;
+	readonly shortDescription?: string;
+	readonly iconSmall?: string;
+	readonly iconLarge?: string;
+	readonly brandColor?: string;
+	readonly defaultPrompt?: string;
+}
+
+export type CodingSkillProduct = "chatgpt" | "codex" | "atlas";
+
+export interface CodingSkillPolicyMetadata {
+	readonly allowImplicitInvocation?: boolean;
+	readonly products: readonly CodingSkillProduct[];
+}
+
+export interface CodingSkillToolDependency {
+	readonly type: string;
+	readonly value: string;
+	readonly description?: string;
+	readonly transport?: string;
+	readonly command?: string;
+	readonly url?: string;
+	readonly oauth?: {
+		readonly callbackPort?: number;
+	};
+}
+
+export interface CodingSkillDependenciesMetadata {
+	readonly tools: readonly CodingSkillToolDependency[];
+}
+
+export interface CodingSkillSidecarMetadata {
+	readonly interface?: CodingSkillInterfaceMetadata;
+	readonly dependencies?: CodingSkillDependenciesMetadata;
+	readonly policy?: CodingSkillPolicyMetadata;
+}
+
 export interface ResolvedCodingSkill {
 	readonly candidate: SkillCandidate<CodingSkillOrigin>;
 	readonly origin: CodingSkillOrigin;
@@ -29,6 +68,9 @@ export interface ResolvedCodingSkill {
 	readonly sourceLabel: string;
 	readonly qualifiedName: string;
 	readonly implicitInvocation: boolean;
+	readonly interface?: CodingSkillInterfaceMetadata;
+	readonly dependencies?: CodingSkillDependenciesMetadata;
+	readonly policy?: CodingSkillPolicyMetadata;
 }
 
 export interface CodingSkillDiagnostic {

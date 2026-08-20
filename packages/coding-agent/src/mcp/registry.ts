@@ -1,5 +1,15 @@
 import type { McpHost, McpHostSnapshot, McpServerDefinition, McpToolLease } from "@coda/mcp";
 
+export interface CodingMcpToolLease extends McpToolLease {
+	/** Exact Agent Plugin Server identities bound to this catalog revision. */
+	readonly agentPluginServerIds: readonly string[];
+}
+
+export interface CodingMcpReloadContext {
+	readonly signal?: AbortSignal;
+	readonly agentPluginServerIds?: readonly string[];
+}
+
 export interface McpRegistryScheduler {
 	schedule(delayMs: number, task: () => void): { cancel(): void };
 }
@@ -18,7 +28,10 @@ export class CodingMcpRegistry {
 	readonly #reconnectDelaysMs: readonly number[];
 	readonly #reconnect = new Map<string, ReconnectState>();
 	readonly #detach: () => void;
-	#selectedToolIds: ReadonlySet<string> = new Set();
+	#agentPluginServerIds: readonly string[] = Object.freeze([]);
+	#agentPluginServerIdsByRevision = new Map<number, readonly string[]>();
+	#reloadTail: Promise<void> = Promise.resolve();
+	#reloading = false;
 	#closed = false;
 
 	constructor(options: {
@@ -32,14 +45,42 @@ export class CodingMcpRegistry {
 		if (this.#reconnectDelaysMs.some((delay) => !Number.isFinite(delay) || delay < 0)) {
 			throw new Error("MCP reconnect delays must be non-negative finite numbers");
 		}
+		this.#agentPluginServerIdsByRevision.set(this.#host.snapshot().revision, this.#agentPluginServerIds);
 		this.#detach = this.#host.onDidChange((snapshot) => this.#observe(snapshot));
 	}
 
-	reload(definitions: readonly McpServerDefinition[], context?: { readonly signal?: AbortSignal }) {
+	reload(definitions: readonly McpServerDefinition[], context: CodingMcpReloadContext = {}) {
 		this.#assertOpen();
-		for (const state of this.#reconnect.values()) state.task?.cancel();
-		this.#reconnect.clear();
-		return this.#host.reload(definitions, context);
+		const definitionIds = new Set(definitions.map(({ id }) => id));
+		const agentPluginServerIds = Object.freeze([...(context.agentPluginServerIds ?? [])].sort(compareText));
+		if (
+			new Set(agentPluginServerIds).size !== agentPluginServerIds.length ||
+			agentPluginServerIds.some((id) => !definitionIds.has(id))
+		) {
+			throw new Error("Agent Plugin MCP provenance must contain unique configured Server ids");
+		}
+		const operation = this.#reloadTail.then(async () => {
+			this.#assertOpen();
+			this.#reloading = true;
+			for (const state of this.#reconnect.values()) state.task?.cancel();
+			this.#reconnect.clear();
+			try {
+				const snapshot = await this.#host.reload(
+					definitions,
+					context.signal ? { signal: context.signal } : undefined,
+				);
+				this.#agentPluginServerIds = agentPluginServerIds;
+				this.#rememberProvenance(snapshot.revision, agentPluginServerIds);
+				return snapshot;
+			} finally {
+				this.#reloading = false;
+			}
+		});
+		this.#reloadTail = operation.then(
+			() => undefined,
+			() => undefined,
+		);
+		return operation;
 	}
 
 	refresh(context?: { readonly signal?: AbortSignal }) {
@@ -59,19 +100,16 @@ export class CodingMcpRegistry {
 		return this.#host.snapshot();
 	}
 
-	acquireTools(): McpToolLease {
+	acquireTools(): CodingMcpToolLease {
 		this.#assertOpen();
-		return this.#host.acquireTools();
-	}
-
-	/** Replaces the MCP Tools admitted into the next Run. Empty means none. */
-	selectTools(ids: readonly string[]): void {
-		this.#assertOpen();
-		this.#selectedToolIds = new Set(ids);
-	}
-
-	selectedToolIds(): ReadonlySet<string> {
-		return this.#selectedToolIds;
+		if (this.#reloading) throw new Error("MCP Tools cannot be acquired during a catalog reload");
+		const lease = this.#host.acquireTools();
+		const agentPluginServerIds = this.#agentPluginServerIdsByRevision.get(lease.revision);
+		if (!agentPluginServerIds) {
+			void lease.dispose().catch(() => undefined);
+			throw new Error(`MCP provenance is unavailable for catalog revision ${lease.revision}`);
+		}
+		return Object.freeze({ ...lease, agentPluginServerIds });
 	}
 
 	onDidChange(listener: (snapshot: McpHostSnapshot) => void): () => void {
@@ -90,6 +128,7 @@ export class CodingMcpRegistry {
 
 	#observe(snapshot: McpHostSnapshot): void {
 		if (this.#closed) return;
+		if (!this.#reloading) this.#rememberProvenance(snapshot.revision, this.#agentPluginServerIds);
 		const visible = new Set(snapshot.servers.map(({ id }) => id));
 		for (const [serverId, state] of this.#reconnect) {
 			if (visible.has(serverId)) continue;
@@ -105,6 +144,11 @@ export class CodingMcpRegistry {
 			}
 			this.#schedule(server.id);
 		}
+	}
+
+	#rememberProvenance(revision: number, agentPluginServerIds: readonly string[]): void {
+		this.#agentPluginServerIdsByRevision.clear();
+		this.#agentPluginServerIdsByRevision.set(revision, agentPluginServerIds);
 	}
 
 	#schedule(serverId: string): void {
@@ -134,4 +178,8 @@ export class CodingMcpRegistry {
 	#assertOpen(): void {
 		if (this.#closed) throw new Error("MCP Registry is closed");
 	}
+}
+
+function compareText(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
 }

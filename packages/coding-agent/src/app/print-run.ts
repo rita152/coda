@@ -1,4 +1,4 @@
-import type { AgentInput, Clock } from "@coda/agent";
+import type { Clock } from "@coda/agent";
 import { CodingCompletionController } from "../completion/completion-controller.ts";
 import type { CompletionWorkspaceEvidenceProvider } from "../completion/types.ts";
 import { createGitWorkspaceEvidenceProvider } from "../completion/workspace-evidence.ts";
@@ -11,6 +11,7 @@ import { withRunControlEvidence } from "../run-evidence/run-evidence.ts";
 import type { SessionWorkController } from "../runtime/session-work-controller.ts";
 import type { Session } from "../session/types.ts";
 import type { AttachmentTransaction } from "../ui/input-controller.ts";
+import type { PreparedWorkInput } from "../ui/input-types.ts";
 import { finalText } from "./argument-parsing.ts";
 import { type JsonEventStreamMode, JsonEventWriter } from "./json-event-writer.ts";
 import { projectJsonMedia } from "./media-attachments.ts";
@@ -18,7 +19,7 @@ import { projectJsonMedia } from "./media-attachments.ts";
 export interface PrintRunOptions {
 	readonly work: SessionWorkController;
 	readonly session: Session;
-	readonly input: AgentInput;
+	readonly input: PreparedWorkInput;
 	readonly attachmentIds: readonly string[];
 	readonly prepareAttachments: (attachmentIds: readonly string[]) => Promise<AttachmentTransaction>;
 	readonly mediaLibrary: MediaLibrary;
@@ -59,7 +60,11 @@ export async function runPrint(options: PrintRunOptions): Promise<number> {
 	});
 	let result: Awaited<ReturnType<SessionWorkController["prompt"]>>;
 	try {
-		result = await options.work.prompt(options.input, options.attachmentIds);
+		result = await options.work.prompt(
+			options.input.input,
+			options.attachmentIds,
+			options.input.capabilitySelections,
+		);
 	} finally {
 		detachInitialMediaCommit();
 		if (!initialMediaCommitted) await initialMedia.rollback();

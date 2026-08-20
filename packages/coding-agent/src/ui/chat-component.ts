@@ -44,6 +44,7 @@ import { ChatTimelineRenderer } from "./chat-timeline-renderer.ts";
 import { CommandComposer, renderCommandPalette } from "./command-composer.ts";
 import { CommandFlowHost, type CommandFlowScreen, renderCommandFlow } from "./command-flow-host.ts";
 import { ComposerHistory } from "./composer-history.ts";
+import { addExtensionReference } from "./extension-references.ts";
 import { FileMentionComposer, renderFileMentionPalette } from "./file-mention-composer.ts";
 import type { UserShellSubmission } from "./input-types.ts";
 import type { StatusLineSnapshot } from "./status-line.ts";
@@ -66,6 +67,15 @@ export interface ChatAttachment {
 	readonly height: number;
 	readonly bytes: number;
 	readonly preview?: ChatAttachmentPreview;
+}
+
+export interface ComposerExtensionPrefill {
+	readonly text: string;
+	readonly commandId: string;
+	readonly source: "skill" | "mcp";
+	readonly name: string;
+	readonly start: number;
+	readonly end: number;
 }
 
 export interface ChatComponentOptions {
@@ -298,6 +308,28 @@ export class ChatComponent extends Component {
 
 	openCommandFlow(screen: CommandFlowScreen): void {
 		this.#commandFlow.open(screen);
+	}
+
+	prefillExtension(prefill: ComposerExtensionPrefill): void {
+		if (
+			prefill.start < 0 ||
+			prefill.end <= prefill.start ||
+			prefill.end > prefill.text.length ||
+			prefill.text.slice(prefill.start, prefill.end) !== `$${prefill.name}`
+		) {
+			throw new Error("Extension prefill reference does not match its text");
+		}
+		this.#commandFlow.close();
+		this.#editor.setText(prefill.text);
+		addExtensionReference(
+			this.#editor,
+			{ id: prefill.commandId, source: prefill.source, name: prefill.name },
+			prefill.start,
+			prefill.end,
+		);
+		this.#history.reset();
+		this.#state.mutate({ type: "set_error", value: undefined });
+		this.invalidate();
 	}
 
 	stageAttachment(attachment: ChatAttachment): void {

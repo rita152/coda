@@ -77,7 +77,8 @@ export class CommandFlowHost {
 	}
 
 	open(screen: CommandFlowScreen): void {
-		this.#stack.splice(0, this.#stack.length, createFrame(screen));
+		const dismissed = this.#stack.splice(0, this.#stack.length, createFrame(screen));
+		this.#dismiss(dismissed.reverse());
 		this.#onChange();
 	}
 
@@ -91,17 +92,20 @@ export class CommandFlowHost {
 			this.open(screen);
 			return;
 		}
+		const dismissed = this.#stack[this.#stack.length - 1];
 		this.#stack[this.#stack.length - 1] = createFrame(screen);
+		if (dismissed) this.#dismiss([dismissed]);
 		this.#onChange();
 	}
 
 	back(): void {
-		this.#stack.pop();
+		const dismissed = this.#stack.pop();
+		if (dismissed) this.#dismiss([dismissed]);
 		this.#onChange();
 	}
 
 	close(): void {
-		this.#stack.splice(0, this.#stack.length);
+		this.#dismiss(this.#stack.splice(0).reverse());
 		this.#onChange();
 	}
 
@@ -187,6 +191,16 @@ export class CommandFlowHost {
 			return;
 		}
 		if (isPromiseLike(result)) void Promise.resolve(result).catch(this.#onError);
+	}
+
+	#dismiss(frames: readonly CommandFlowFrame[]): void {
+		for (const frame of frames) {
+			try {
+				frame.screen.onDismiss?.();
+			} catch (error) {
+				this.#onError(error);
+			}
+		}
 	}
 }
 

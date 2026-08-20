@@ -183,7 +183,7 @@ configuration fields.
 The Composer's borderless upper list exposes the core Slash commands:
 
 <!-- coda:core-commands:start -->
-Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/mcp`, `/hooks`, `/permissions`, `/session`, `/cancel-work`, `/new`, and `/follow-up`.
+Visible core commands are `/auth`, `/model`, `/effort`, `/skills`, `/plugins`, `/mcp`, `/hooks`, `/permissions`, `/session`, `/cancel-work`, `/new`, and `/follow-up`.
 <!-- coda:core-commands:end -->
 
 Selector commands open nested menus and do not accept
@@ -206,20 +206,25 @@ Useful maintenance commands are `coda sessions` and `coda cleanup`. Run
 `coda skills validate <path>` for strict Agent Skills validation without a Model
 or Session.
 
-Local Agent Skills are discovered from `<Workspace>/.agents/skills` and
-`~/.agents/skills`. A validated Agent Plugin may also contribute immediate-child
-Skills from `<Workspace>/.agents/plugins/<name>/skills/` or
-`~/.agents/plugins/<name>/skills/`; Coda does not scan ancestor directories or
-unrelated client-specific roots. Precedence is direct Workspace Skill,
-Workspace Plugin Skill, direct user Skill, then user Plugin Skill. Global Skills
-are user-managed, and typing `$` shows every admitted Skill for explicit
-selection. A plain `$name` in print or interactive text injects that Skill for
-the current Run. Coda does not make a separate Skill safety decision. Explicit
-Composer Skill references are user-selected context; model-selected Skills use
-the `skill` Tool to load exact-revision instructions. Skills marked
-`disable-model-invocation: true` or Codex `policy.allow_implicit_invocation: false`
-stay in the `$` palette and can be `$`-injected, but they are omitted from the
-model catalog. `/skills` remains the sole Skill management command.
+Local Agent Skills follow Codex's project-root discovery policy: Coda searches
+each `.agents/skills` from the nearest Git root through the current Workspace,
+then `~/.agents/skills` and the deprecated `~/.codex/skills` root. Validated
+Agent Plugins contribute immediate-child Skills through the same Inventory.
+Closer project roots take precedence, Plugin Skills use stable
+`<plugin-name>:<skill-name>` names, and lower-priority collisions remain
+explicitly addressable. Missing roots are watched so the first Skill created
+after startup appears on a later Run.
+
+Typing `$` shows every admitted Skill for explicit selection. A plain `$name`
+in print or interactive text injects the exact revision for that Run using the
+Codex `<skill>` envelope and an 8,000-byte `SKILL.md` content bound; bundled
+resources are read only when the Skill routes the Agent to them. Model-selected
+Skills use the `skill` Tool with the same frozen snapshot. Codex
+`agents/openai.yaml` interface metadata drives presentation, while
+`policy.allow_implicit_invocation: false` (or
+`disable-model-invocation: true`) keeps a Skill in the `$` palette but removes
+it from the model catalog. `policy.products` excludes Skills intended only for
+another product. `/skills` remains the Skill inventory command.
 
 ## Lifecycle Hooks
 
@@ -303,14 +308,23 @@ Coda can act as an MCP Host and expose external Server Tools to the Coding
 Agent. User-managed Server Definitions live in `~/.coda/settings.json` under
 `mcpServers`. Workspace Definitions live in `<Workspace>/.coda/mcp.json` and
 remain inert until the exact file hash is reviewed interactively or admitted
-with `--trust-project-mcp`. Agent Plugins are discovered by installation slot
-from `<Workspace>/.agents/plugins/<name>/` and `~/.agents/plugins/<name>/`, with
-the valid Workspace slot winning over the same user slot. Plugin Skills enter
-the same Skill Inventory. User Plugin MCP Servers are admitted like user MCP
-settings; each Workspace Plugin `mcp.json` has its own exact-revision trust
-record and remains inert until reviewed or admitted with the same flag. Stdio
-Plugin state is stored persistently under `~/.coda/plugin-data/` and is created
-only after admission. A changed Workspace file requires review again.
+with `--trust-project-mcp`. Coda accepts only Agent Plugins 1.0.0 rooted at
+`plugin.json`; it never scans, imports, or falls back to
+`.codex-plugin/plugin.json`. Direct Workspace and user packages remain
+discoverable under `.agents/plugins`, while managed installations are browsed
+from configured local or Git Marketplaces and activated from content-addressed
+revisions under `~/.coda/plugins`. Workspace precedence and per-installation
+enablement apply to the complete Skill/MCP bundle. Workspace Plugin `mcp.json`
+still requires exact-revision MCP trust; managed user Plugin Servers are
+admitted like user MCP settings. Stdio Plugin data is isolated by stable
+installation identity under `~/.coda/plugin-data/` and survives upgrades.
+
+Use interactive `/plugins` or the headless `coda plugin` family to browse,
+inspect, install, enable, disable, upgrade, remove, and diagnose Plugins and
+Marketplaces. Plugin Skills enter the shared Skill Inventory as
+`<plugin-name>:<skill-name>`; Plugin MCP Servers keep stable path-independent
+identities. A refresh publishes Plugin, Skill, and MCP changes atomically for a
+later Run while active Runs retain their original capability lease.
 
 ```json
 {
@@ -369,10 +383,12 @@ persisted or stored in the Definition. Agent Plugin `streamable-http` Servers
 reuse this transport; legacy Agent Plugin `sse` (HTTP+SSE) entries are diagnosed
 and skipped.
 
-Every admitted Tool is namespaced as `mcp__<server>__<tool>`. A Tool enters a
-Run only when the user names it with `$` — `$search`, `$docs-search`,
-`$mcp__docs__search`, or `$docs` for every Tool on that Server. Server
-annotations do not change how Coda invokes the Tool. Form and URL Elicitation identify the requesting Server; Coda never
+Every admitted Tool is namespaced as `mcp__<server>__<tool>` and every ready,
+model-visible Tool enters the Prepared Run directly. `$search`, `$docs-search`,
+`$mcp__docs__search`, or `$docs` records an immutable presence assertion for
+that exact Run; it does not grant trust or visibility, and an unresolved
+assertion fails closed. Server annotations do not change how Coda invokes the
+Tool. Form and URL Elicitation identify the requesting Server; Coda never
 prefetches or opens an Elicitation URL. Print mode declines Elicitation.
 Use `/mcp status`, `/mcp doctor`, `/mcp inspect`, `/mcp reload`, and
 `/mcp reconnect` for read-only inspection and operational control.
@@ -410,7 +426,7 @@ This status block is generated from executable runtime contracts. See the
 - **Durable Context Compaction** (@coda/runtime) — Private Worker Runtimes automatically compact at safe model-call boundaries and durably persist Tool-pair-safe Compaction Checkpoints before replacing the model-visible Context Window.
 - **Secure platform Credential storage** (@coda/coding-agent) — API credentials use macOS Keychain or Linux Secret Service when available, never persist plaintext fallback secrets, redact helper failures, and otherwise remain process-local.
 - **Lifecycle Hooks** (@coda/coding-agent) — Codex-compatible command Hooks cover Session, Prompt, Tool, Compaction, Stop, and SubagentStart/SubagentStop boundaries with exact-handler trust, concurrent matching, async delivery, Tool guarding and rewriting, and automatic Stop continuation. SubagentStart fires when a child Work Item enters running; SubagentStop fires at that child's terminal state.
-- **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, mention-gated Run admission, progress, cancellation, subscriptions, and form or URL Elicitation.
+- **MCP Host** (@coda/mcp) — MCP Tools over stdio and Streamable HTTP with version negotiation, Workspace trust, direct immutable per-Run exposure, Agent Plugin model-spec budgets, progress, cancellation, subscriptions, and form or URL Elicitation.
 - **Media Assets** (@coda/coding-agent) — Bounded image Attachments use content-addressed Session storage, model-ready renditions, Kitty previews, and a system-viewer fallback.
 - **Context Overflow fallback** (@coda/coding-agent) — After local and Provider overflow recovery is exhausted, interactive mode can open a fresh empty Session in the same Workspace without inheriting Messages, summaries, media, queues, Tool state, or Run evidence.
 - **Process Confinement** (@coda/sandbox) — A leaf wrapScript seam confines Bash, User Shell, and Process Session scripts through Anthropic Sandbox Runtime in read-only or workspace-write mode. danger-full-access leaves the process on the host. File Tools, hook handlers, and credential helpers stay on the host.

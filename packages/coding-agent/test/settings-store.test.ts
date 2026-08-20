@@ -1,9 +1,10 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileSettingsStore } from "../src/app/file-settings-store.ts";
 import { createNodeFileSystem } from "../src/host/node-file-system.ts";
+import type { UserSettings } from "../src/settings/types.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -12,6 +13,144 @@ afterEach(async () => {
 });
 
 describe("FileSettingsStore", () => {
+	it("serializes cross-instance updates without losing unrelated settings", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-settings-update-"));
+		temporaryDirectories.push(homeDirectory);
+		const fileSystem = createNodeFileSystem();
+		const first = new FileSettingsStore({
+			fileSystem,
+			homeDirectory,
+			idGenerator: { generate: () => "first-update" },
+		});
+		const second = new FileSettingsStore({
+			fileSystem,
+			homeDirectory,
+			idGenerator: { generate: () => "second-update" },
+		});
+
+		const [firstResult, secondResult] = await Promise.all([
+			first.update((settings) => ({ ...settings, defaultReasoning: "high" })),
+			second.update((settings) => ({
+				...settings,
+				plugins: { "review-tools@workspace-local": { enabled: false } },
+			})),
+		]);
+
+		expect([firstResult, secondResult]).toContainEqual({
+			defaultReasoning: "high",
+			plugins: { "review-tools@workspace-local": { enabled: false } },
+		});
+		await expect(first.load()).resolves.toEqual({
+			defaultReasoning: "high",
+			plugins: { "review-tools@workspace-local": { enabled: false } },
+		});
+	});
+
+	it("strictly validates the latest file and mutation before an update can commit", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-settings-strict-update-"));
+		temporaryDirectories.push(homeDirectory);
+		const settingsPath = join(homeDirectory, ".coda", "settings.json");
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "strict-update" },
+		});
+		await store.save({ defaultReasoning: "high" });
+
+		await expect(store.update((settings) => ({ ...settings, unknownSetting: true }) as UserSettings)).rejects.toThrow(
+			"unknown field",
+		);
+		await expect(store.load()).resolves.toEqual({ defaultReasoning: "high" });
+
+		await writeFile(settingsPath, "{not-json");
+		const mutator = vi.fn((settings: UserSettings) => settings);
+		await expect(store.update(mutator)).rejects.toThrow("not valid JSON");
+		expect(mutator).not.toHaveBeenCalled();
+	});
+
+	it("uses the private temporary inode as the final file without a fallible post-rename chmod", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-settings-commit-point-"));
+		temporaryDirectories.push(homeDirectory);
+		const settingsPath = join(homeDirectory, ".coda", "settings.json");
+		const base = createNodeFileSystem();
+		let finalModeAttempts = 0;
+		const store = new FileSettingsStore({
+			fileSystem: {
+				...base,
+				setMode: async (path, mode) => {
+					if (path === settingsPath) {
+						finalModeAttempts++;
+						throw new Error("final chmod unavailable after rename");
+					}
+					await base.setMode(path, mode);
+				},
+			},
+			homeDirectory,
+			idGenerator: { generate: () => "commit-point" },
+		});
+
+		await expect(
+			store.save({ plugins: { "review-tools@workspace-local": { enabled: false } } }),
+		).resolves.toBeUndefined();
+		await expect(store.load()).resolves.toEqual({
+			plugins: { "review-tools@workspace-local": { enabled: false } },
+		});
+		expect(finalModeAttempts).toBe(0);
+		expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
+	});
+
+	it("round-trips Plugin enablement by canonical source-aware identity", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-plugin-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "plugin-settings" },
+		});
+
+		await store.save({
+			plugins: {
+				"review-tools@workspace-local": { enabled: false },
+				"lint-tools@user-local": { enabled: true },
+			},
+		});
+
+		const loaded = await store.load();
+		expect(loaded.plugins).toEqual({
+			"lint-tools@user-local": { enabled: true },
+			"review-tools@workspace-local": { enabled: false },
+		});
+		expect(Object.keys(loaded.plugins ?? {})).toEqual(["lint-tools@user-local", "review-tools@workspace-local"]);
+		expect(JSON.parse(await readFile(join(homeDirectory, ".coda", "settings.json"), "utf8"))).toEqual({
+			version: 1,
+			plugins: {
+				"lint-tools@user-local": { enabled: true },
+				"review-tools@workspace-local": { enabled: false },
+			},
+		});
+	});
+
+	it.each([
+		{ plugins: [] },
+		{ plugins: { "InvalidName@workspace-local": { enabled: false } } },
+		{ plugins: { "review-tools@workspace.local": { enabled: false } } },
+		{ plugins: { "review-tools@workspace-local": {} } },
+		{ plugins: { "review-tools@workspace-local": { enabled: "false" } } },
+		{ plugins: { "review-tools@workspace-local": { enabled: false, path: "/tmp/plugin" } } },
+	])("rejects invalid Plugin identities and enablement entries", async (settings) => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-invalid-plugin-settings-"));
+		temporaryDirectories.push(homeDirectory);
+		await mkdir(join(homeDirectory, ".coda"));
+		await writeFile(join(homeDirectory, ".coda", "settings.json"), JSON.stringify({ version: 1, ...settings }));
+		const store = new FileSettingsStore({
+			fileSystem: createNodeFileSystem(),
+			homeDirectory,
+			idGenerator: { generate: () => "unused" },
+		});
+
+		await expect(store.load()).rejects.toThrow("invalid Plugin settings");
+	});
+
 	it("round-trips multiple Workspace MCP trust sources for one workspace by canonical path", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "coda-mcp-trust-settings-"));
 		temporaryDirectories.push(homeDirectory);
@@ -70,6 +209,7 @@ describe("FileSettingsStore", () => {
 			mcpServers: [
 				{
 					id: "docs",
+					oauth: { callbackPort: 3118 },
 					transport: {
 						kind: "http",
 						url: "https://docs.example.test/mcp",
@@ -122,6 +262,7 @@ describe("FileSettingsStore", () => {
 			mcpServers: [
 				{
 					id: "docs",
+					oauth: { callbackPort: 3118 },
 					transport: {
 						kind: "http",
 						url: "https://docs.example.test/mcp",
@@ -175,6 +316,7 @@ describe("FileSettingsStore", () => {
 			mcpServers: [
 				{
 					id: "docs",
+					oauth: { callbackPort: 3118 },
 					transport: {
 						kind: "http",
 						url: "https://docs.example.test/mcp",

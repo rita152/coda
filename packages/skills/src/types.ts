@@ -189,6 +189,8 @@ export interface SkillCandidate<Origin = unknown> {
 export interface SkillActivation<Origin = unknown> {
 	readonly candidate: SkillCandidate<Origin>;
 	readonly revision: SkillRevision;
+	/** Exact, revision-bound SKILL.md text, including YAML frontmatter. */
+	readonly contents: string;
 	readonly body: string;
 	readonly baseDirectory: string;
 	readonly arguments?: string;

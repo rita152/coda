@@ -1,5 +1,6 @@
 import type { McpHttpTransportDefinition, McpStdioTransportDefinition } from "@coda/mcp";
 import type { SkillFileSystem, SkillsSnapshot } from "@coda/skills";
+import { DEFAULT_SKILL_LIMITS } from "@coda/skills";
 
 export const AGENT_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 export const AGENT_PLUGIN_MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
@@ -7,11 +8,15 @@ export const AGENT_PLUGIN_MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/
 export interface PluginLimits {
 	readonly maxManifestBytes: number;
 	readonly maxMcpConfigurationBytes: number;
+	readonly maxSkillComponents: number;
+	readonly maxSkillScanEntries: number;
 }
 
 export const DEFAULT_PLUGIN_LIMITS: Readonly<PluginLimits> = Object.freeze({
 	maxManifestBytes: 256 * 1024,
 	maxMcpConfigurationBytes: 1024 * 1024,
+	maxSkillComponents: DEFAULT_SKILL_LIMITS.maxSkills,
+	maxSkillScanEntries: DEFAULT_SKILL_LIMITS.maxEntries,
 });
 
 export interface PluginAuthor {
@@ -40,6 +45,8 @@ export interface PluginDiagnostic<Origin = unknown> {
 	readonly severity: PluginDiagnosticSeverity;
 	readonly phase: PluginDiagnosticPhase;
 	readonly message: string;
+	/** Package-local Skill or MCP Server member name, when known structurally. */
+	readonly componentName?: string;
 	readonly path?: string;
 	readonly field?: string;
 	readonly pluginRoot: string;
@@ -87,6 +94,8 @@ export interface PluginMcpMaterialization<Origin = unknown> {
 }
 
 export interface PluginMcpMaterializeOptions {
+	/** Canonical client-owned directory that contains this installed Plugin instance's dataDirectory. */
+	readonly dataRoot?: string;
 	readonly dataDirectory?: string;
 	readonly baseEnvironment?: Readonly<Record<string, string | undefined>>;
 	readonly platform: NodeJS.Platform;

@@ -31,6 +31,14 @@ export const CORE_COMMANDS: readonly CommandDefinition[] = Object.freeze([
 		kind: "control",
 	}),
 	coreCommand({
+		id: "core:plugins",
+		name: "plugins",
+		title: "Plugins",
+		description: "Browse and manage Agent Plugins",
+		kind: "control",
+		arguments: { kind: "tail", required: false },
+	}),
+	coreCommand({
 		id: "core:mcp",
 		name: "mcp",
 		title: "MCP",

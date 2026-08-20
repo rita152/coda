@@ -30,6 +30,7 @@ function fileSystemWith(files: Readonly<Record<string, string>>): FileSystem {
 		rename: async () => undefined,
 		removeFile: async () => undefined,
 		removeDirectory: async () => undefined,
+		removeTree: async () => undefined,
 		setMode: async () => undefined,
 	};
 }
@@ -182,5 +183,17 @@ describe("MCP configuration", () => {
 				environment: {},
 			}),
 		).rejects.toThrow('Duplicate MCP Server id "same" across User and Workspace configuration');
+	});
+
+	it.each([
+		" https://example.test/mcp",
+		"https:example.test/mcp",
+		"https:\\example.test\\mcp",
+		"https://@example.test/mcp",
+		"https://example.test/mcp#",
+	])("rejects a non-literal absolute MCP HTTP URL (%s)", (url) => {
+		expect(() =>
+			parseMcpServerConfigurations([{ id: "bad-url", transport: { kind: "http", url } }], "MCP configuration"),
+		).toThrow("absolute http(s) URL without credentials or a fragment");
 	});
 });

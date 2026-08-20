@@ -132,7 +132,8 @@ export class WorkGraphEngine implements CodingAgent {
 				activate: (graph, item) => this.#workerLifecycle.activate(graph, item),
 				runItem: (graph, item) =>
 					this.#workerLifecycle.runItem(graph, item, {
-						delegate: (specifications, signal) => this.#delegation.delegate(graph, item, specifications, signal),
+						delegate: (specifications, signal, capabilitySelections) =>
+							this.#delegation.delegate(graph, item, specifications, signal, capabilitySelections),
 						promptSubmission: () => this.#createSubmission(item, "prompt", item.objective, []),
 						transition: (to) => this.#transition(graph, item, to),
 						settleItem: () => this.#lifecycle.trySettleItem(graph, item),
@@ -155,6 +156,7 @@ export class WorkGraphEngine implements CodingAgent {
 			submit: (batch) => this.submit(batch),
 			deactivate: (graph, item) => this.#workerLifecycle.deactivate(graph, item),
 			requestSchedule: () => this.#scheduler.request(),
+			mergeCapabilitySelections: (parent, child) => this.#options.runCapabilities.mergeSelections(parent, child),
 		});
 		this.#lifecycle = new WorkGraphLifecycle({
 			graphs: this.#graphs,
@@ -437,7 +439,13 @@ export class WorkGraphEngine implements CodingAgent {
 	}
 
 	#queueDelivery(item: ItemRecord, command: DeliverWorkItemInput): void {
-		const submission = this.#createSubmission(item, command.kind, command.input, command.resources ?? []);
+		const submission = this.#createSubmission(
+			item,
+			command.kind,
+			command.input,
+			command.resources ?? [],
+			command.capabilitySelections,
+		);
 		if (command.kind === "prompt") item.process.promptInput = submission;
 		else item.process.pendingInputs.push({ submission });
 	}
@@ -507,6 +515,7 @@ export class WorkGraphEngine implements CodingAgent {
 				kind: command.kind,
 				input: command.input,
 				resourceReferences: command.resources ?? [],
+				...(command.capabilitySelections ? { capabilitySelections: command.capabilitySelections } : {}),
 			});
 		}
 		for (const { command, item } of plan.configurations) {
@@ -593,6 +602,7 @@ export class WorkGraphEngine implements CodingAgent {
 		kind: WorkItemInputKind,
 		input: AgentInput,
 		resourceReferences: readonly string[],
+		capabilitySelections?: WorkerSubmission["capabilitySelections"],
 	): WorkerSubmission {
 		return immutableData({
 			preparationId: `preparation:${item.graphId}:${item.id}:${this.#options.identity.generate("queue_item")}`,
@@ -601,6 +611,7 @@ export class WorkGraphEngine implements CodingAgent {
 			kind,
 			input,
 			resourceReferences,
+			...(capabilitySelections ? { capabilitySelections } : {}),
 		});
 	}
 

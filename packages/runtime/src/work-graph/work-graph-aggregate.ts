@@ -33,6 +33,7 @@ export interface WorkGraphInputState {
 	readonly kind: Extract<WorkGraphFact, { readonly type: "input_accepted" }>["kind"];
 	readonly input: Extract<WorkGraphFact, { readonly type: "input_accepted" }>["input"];
 	readonly resourceReferences: readonly string[];
+	readonly capabilitySelections?: Extract<WorkGraphFact, { readonly type: "input_accepted" }>["capabilitySelections"];
 	readonly acceptedAt: number;
 	readonly settlement: "pending" | "committed" | "failed";
 	readonly settledAt?: number;
@@ -366,6 +367,7 @@ function reduceWorkGraphFact(snapshot: WorkGraphAggregateSnapshot, fact: WorkGra
 				kind: fact.kind,
 				input: fact.input,
 				resourceReferences: fact.resourceReferences,
+				...(fact.capabilitySelections ? { capabilitySelections: fact.capabilitySelections } : {}),
 				acceptedAt: fact.timestamp,
 				settlement: fact.resourceReferences.length === 0 ? "committed" : "pending",
 				...(fact.resourceReferences.length === 0 ? { settledAt: fact.timestamp } : {}),

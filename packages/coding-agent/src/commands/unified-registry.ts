@@ -7,6 +7,7 @@ export interface CommandExtensionEntry {
 	readonly name: string;
 	readonly title?: string;
 	readonly description?: string;
+	readonly defaultPrompt?: string;
 }
 
 export interface UnifiedCommandRegistryOptions {
@@ -41,6 +42,7 @@ function extensionCommand(source: Exclude<CommandSource, "core">, entry: Command
 		name,
 		title: entry.title?.trim() || name,
 		description: entry.description,
+		...(entry.defaultPrompt?.trim() ? { defaultPrompt: entry.defaultPrompt.trim() } : {}),
 		source,
 		kind: "extension",
 		triggerScope: "token_boundary",

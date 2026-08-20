@@ -2,6 +2,7 @@ import type {
 	CodingAgentCommandBatch,
 	CodingAgentReceipt,
 	DesiredRuntimeConfigurationPatch,
+	RunCapabilitySelections,
 	WorkResult,
 } from "./types.ts";
 import { type GraphRecord, type ItemRecord, isTerminal } from "./work-graph-records.ts";
@@ -12,12 +13,17 @@ export interface DelegatedWorkItemSpecification {
 	readonly executionMode: "read_only" | "write";
 	readonly dependencies?: readonly string[];
 	readonly configuration?: DesiredRuntimeConfigurationPatch;
+	readonly capabilitySelections?: RunCapabilitySelections;
 }
 
 export interface WorkGraphDelegationHost {
 	submit(batch: CodingAgentCommandBatch): Promise<CodingAgentReceipt>;
 	deactivate(graph: GraphRecord, item: ItemRecord): void;
 	requestSchedule(): void;
+	mergeCapabilitySelections(
+		parent: RunCapabilitySelections | undefined,
+		child: RunCapabilitySelections | undefined,
+	): RunCapabilitySelections | undefined;
 }
 
 export class WorkGraphDelegationController {
@@ -33,6 +39,7 @@ export class WorkGraphDelegationController {
 		parent: ItemRecord,
 		specifications: readonly DelegatedWorkItemSpecification[],
 		signal: AbortSignal,
+		parentCapabilitySelections?: RunCapabilitySelections,
 	): Promise<readonly WorkResult[]> {
 		if (
 			parent.executionMode !== "write" ||
@@ -46,6 +53,9 @@ export class WorkGraphDelegationController {
 		this.#host.deactivate(graph, parent);
 		try {
 			signal.throwIfAborted();
+			const childCapabilitySelections = specifications.map((specification) =>
+				this.#host.mergeCapabilitySelections(parentCapabilitySelections, specification.capabilitySelections),
+			);
 			const receipt = await this.#host.submit({
 				commands: [
 					{
@@ -60,6 +70,21 @@ export class WorkGraphDelegationController {
 							...(specification.configuration ? { configuration: specification.configuration } : {}),
 						})),
 					},
+					...specifications.flatMap((specification, index) => {
+						const capabilitySelections = childCapabilitySelections[index];
+						return capabilitySelections
+							? [
+									{
+										type: "deliver_work_item_input" as const,
+										graphId: graph.id,
+										itemId: specification.itemId,
+										kind: "prompt" as const,
+										input: specification.objective,
+										capabilitySelections,
+									},
+								]
+							: [];
+					}),
 				],
 			});
 			if (receipt.status === "rejected") {

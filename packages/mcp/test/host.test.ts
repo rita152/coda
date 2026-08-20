@@ -23,6 +23,31 @@ describe("MCP Host", () => {
 		).toThrow("maxModelToolNameCharacters");
 	});
 
+	it("rejects an empty semantic Server identity before connection", async () => {
+		let connections = 0;
+		const host = createMcpHost({
+			connector: {
+				connect: async () => {
+					connections++;
+					throw new Error("must not connect");
+				},
+			},
+		});
+
+		await expect(
+			host.reload([
+				{
+					id: "docs",
+					semanticName: "",
+					protocol: "auto",
+					transport: { kind: "http", url: "https://docs.example.test/mcp" },
+				},
+			]),
+		).rejects.toThrow('Invalid MCP Server semantic name ""');
+		expect(connections).toBe(0);
+		await host.close();
+	});
+
 	it("freezes a stable namespaced Tool Catalog and routes calls by canonical identity", async () => {
 		const calls: Array<{ readonly name: string; readonly arguments: Readonly<Record<string, unknown>> }> = [];
 		const connection: McpConnection = {
@@ -40,6 +65,7 @@ describe("MCP Host", () => {
 						properties: { query: { type: "string" } },
 						required: ["query"],
 					},
+					meta: { ui: { visibility: ["model"] } },
 				},
 			],
 			callTool: async (request) => {
@@ -66,6 +92,7 @@ describe("MCP Host", () => {
 		expect(snapshot.servers).toEqual([
 			expect.objectContaining({
 				id: "docs",
+				semanticName: "docs",
 				status: "ready",
 				protocolEra: "modern",
 				protocolVersion: "2026-07-28",
@@ -76,9 +103,11 @@ describe("MCP Host", () => {
 			expect.objectContaining({
 				id: "mcp:docs:search",
 				serverId: "docs",
+				serverSemanticName: "docs",
 				remoteName: "search",
 				name: "mcp__docs__search",
 				description: "Search the reference documentation",
+				meta: { ui: { visibility: ["model"] } },
 			}),
 		]);
 		expect(Object.isFrozen(snapshot)).toBe(true);
@@ -91,6 +120,88 @@ describe("MCP Host", () => {
 
 		expect(result).toEqual({ isError: false, content: [{ type: "text", text: "Found MCP" }] });
 		expect(calls).toEqual([{ name: "search", arguments: { query: "MCP" } }]);
+		await host.close();
+	});
+
+	it("projects one semantic Server name while routing Tools through the internal Server id", async () => {
+		const connectedIds: string[] = [];
+		const calledTools: string[] = [];
+		const host = createMcpHost({
+			connector: {
+				connect: async (definition) => {
+					connectedIds.push(definition.id);
+					return {
+						info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+						listTools: async () => [{ name: "Search", inputSchema: { type: "object", properties: {} } }],
+						callTool: async ({ name }) => {
+							calledTools.push(name);
+							return { isError: false, content: [] };
+						},
+						close: async () => undefined,
+					};
+				},
+			},
+		});
+		const internalId = `p_${"a".repeat(62)}`;
+
+		const snapshot = await host.reload([
+			{
+				id: internalId,
+				semanticName: "portable-tools:Docs",
+				protocol: "auto",
+				transport: { kind: "http", url: "https://docs.example.test/mcp" },
+			},
+		]);
+
+		expect(snapshot.servers).toEqual([
+			expect.objectContaining({ id: internalId, semanticName: "portable-tools:Docs" }),
+		]);
+		expect(snapshot.tools).toEqual([
+			expect.objectContaining({
+				id: `mcp:${internalId}:Search`,
+				serverId: internalId,
+				serverSemanticName: "portable-tools:Docs",
+			}),
+		]);
+		await host.callTool({ toolId: snapshot.tools[0]!.id, arguments: {} });
+		expect(connectedIds).toEqual([internalId]);
+		expect(calledTools).toEqual(["Search"]);
+		await host.close();
+	});
+
+	it("retains the semantic Server name in degraded state and diagnostics", async () => {
+		const internalId = `p_${"b".repeat(62)}`;
+		const host = createMcpHost({
+			connector: {
+				connect: async () => {
+					throw new Error("upstream unavailable");
+				},
+			},
+		});
+
+		const snapshot = await host.reload([
+			{
+				id: internalId,
+				semanticName: "portable-tools:Docs",
+				protocol: "auto",
+				transport: { kind: "http", url: "https://docs.example.test/mcp" },
+			},
+		]);
+
+		expect(snapshot.servers).toEqual([
+			expect.objectContaining({
+				id: internalId,
+				semanticName: "portable-tools:Docs",
+				status: "degraded",
+			}),
+		]);
+		expect(snapshot.diagnostics).toEqual([
+			expect.objectContaining({
+				serverId: internalId,
+				serverSemanticName: "portable-tools:Docs",
+				message: "upstream unavailable",
+			}),
+		]);
 		await host.close();
 	});
 
@@ -189,6 +300,7 @@ describe("MCP Host", () => {
 		expect(snapshot.diagnostics).toEqual([
 			{
 				serverId: "broken",
+				serverSemanticName: "broken",
 				code: "mcp.server-unavailable",
 				message: "process exited before discovery",
 			},
@@ -372,6 +484,7 @@ describe("MCP Host", () => {
 		expect(snapshot.diagnostics).toEqual([
 			{
 				serverId: "schemas",
+				serverSemanticName: "schemas",
 				toolName: "unsafe",
 				code: "mcp.tool-invalid-schema",
 				message: "inputSchema contains a non-local $ref",
@@ -508,6 +621,7 @@ describe("MCP Host", () => {
 		await host.reload([
 			{
 				id: "dynamic",
+				semanticName: "portable-tools:Docs",
 				protocol: "2026-07-28",
 				transport: { kind: "http", url: "https://dynamic.example.test/mcp" },
 			},
@@ -522,9 +636,64 @@ describe("MCP Host", () => {
 
 		expect(refreshed.revision).toBe(2);
 		expect(refreshed.tools.map(({ remoteName }) => remoteName)).toEqual(["second"]);
+		expect(refreshed.servers).toEqual([
+			expect.objectContaining({ id: "dynamic", semanticName: "portable-tools:Docs", status: "ready" }),
+		]);
+		expect(refreshed.tools).toEqual([
+			expect.objectContaining({ serverId: "dynamic", serverSemanticName: "portable-tools:Docs" }),
+		]);
 		expect(observed).toEqual([2]);
 		expect((await host.refresh()).revision).toBe(2);
 		unsubscribe();
+		await host.close();
+	});
+
+	it("retains semantic identity when a notified Tool refresh degrades the Server", async () => {
+		let changed: (() => void) | undefined;
+		let failRefresh = false;
+		const host = createMcpHost({
+			connector: {
+				connect: async (_definition, context) => {
+					changed = context?.onToolsChanged;
+					return {
+						info: { protocolEra: "modern", protocolVersion: "2026-07-28" },
+						listTools: async () => {
+							if (failRefresh) throw new Error("catalog unavailable");
+							return [{ name: "search", inputSchema: { type: "object", properties: {} } }];
+						},
+						callTool: async () => ({ isError: false, content: [] }),
+						close: async () => undefined,
+					};
+				},
+			},
+		});
+		await host.reload([
+			{
+				id: "dynamic-failure",
+				semanticName: "portable-tools:Docs",
+				protocol: "auto",
+				transport: { kind: "http", url: "https://docs.example.test/mcp" },
+			},
+		]);
+
+		failRefresh = true;
+		changed?.();
+		const refreshed = await host.refresh();
+
+		expect(refreshed.servers).toEqual([
+			expect.objectContaining({
+				id: "dynamic-failure",
+				semanticName: "portable-tools:Docs",
+				status: "degraded",
+			}),
+		]);
+		expect(refreshed.diagnostics).toEqual([
+			expect.objectContaining({
+				serverId: "dynamic-failure",
+				serverSemanticName: "portable-tools:Docs",
+				message: "catalog unavailable",
+			}),
+		]);
 		await host.close();
 	});
 
@@ -604,6 +773,7 @@ describe("MCP Host", () => {
 		const initial = await host.reload([
 			{
 				id: "recoverable",
+				semanticName: "portable-tools:Docs",
 				protocol: "2026-07-28",
 				transport: { kind: "http", url: "https://recoverable.example.test/mcp" },
 			},
@@ -613,7 +783,12 @@ describe("MCP Host", () => {
 		disconnected?.(new Error("connection lost"));
 
 		expect(host.snapshot().servers).toEqual([
-			expect.objectContaining({ id: "recoverable", status: "degraded", error: "connection lost" }),
+			expect.objectContaining({
+				id: "recoverable",
+				semanticName: "portable-tools:Docs",
+				status: "degraded",
+				error: "connection lost",
+			}),
 		]);
 		expect(host.snapshot().tools).toEqual([]);
 		await expect(host.callTool({ toolId, arguments: {} })).rejects.toThrow(
@@ -622,7 +797,12 @@ describe("MCP Host", () => {
 
 		const restored = await host.reconnect("recoverable");
 		expect(connectCount).toBe(2);
-		expect(restored.servers).toEqual([expect.objectContaining({ id: "recoverable", status: "ready" })]);
+		expect(restored.servers).toEqual([
+			expect.objectContaining({ id: "recoverable", semanticName: "portable-tools:Docs", status: "ready" }),
+		]);
+		expect(restored.tools).toEqual([
+			expect.objectContaining({ serverId: "recoverable", serverSemanticName: "portable-tools:Docs" }),
+		]);
 		expect(restored.tools.map(({ id }) => id)).toEqual([toolId]);
 		await host.close();
 	});

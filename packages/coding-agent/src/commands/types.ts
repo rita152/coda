@@ -25,6 +25,8 @@ export interface CommandDefinition {
 	readonly visibleInPalette?: boolean;
 	readonly title: string;
 	readonly description?: string;
+	/** Optional Skill starter text inserted when selected from an empty Composer. */
+	readonly defaultPrompt?: string;
 	readonly source: CommandSource;
 	readonly kind: CommandKind;
 	readonly triggerScope: CommandTriggerScope;

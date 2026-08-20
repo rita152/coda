@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentInput, Clock, IdGenerator } from "@coda/agent";
+import type { Clock, IdGenerator } from "@coda/agent";
 import type { Api, Model, MutableModels, ThinkingLevel } from "@coda/ai";
 import type { McpElicitationResult } from "@coda/mcp";
 import type { ProcessConfinement } from "@coda/sandbox";
@@ -32,16 +32,19 @@ import type { CodingSkillsSnapshot } from "../skills/types.ts";
 import { activitySummaryModeForApi } from "../ui/activity-status.ts";
 import type { InteractiveCommandPermissionHandler } from "../ui/command-permission.ts";
 import type { FullScreenOutputGate } from "../ui/full-screen-output.ts";
+import type { PreparedWorkInput } from "../ui/input-types.ts";
 import type { InteractiveMcpElicitationHandler } from "../ui/mcp-elicitation.ts";
 import type { InteractiveProcessLifecycle } from "../ui/process-lifecycle.ts";
 import type { PromptRuntime } from "../ui/prompts.ts";
 import { type InteractiveSessionOptions, runInteractive } from "../ui/run-interactive.ts";
+import type { InteractiveSkillMcpDependencyHandler } from "../ui/skill-mcp-dependency.ts";
 import type { PermissionsCommand } from "./approval-sandbox.ts";
 import { finalText, findModel } from "./argument-parsing.ts";
 import { persistCustomProviders, refreshProviderAuth } from "./auth-flows.ts";
 import { createInteractiveSessionOptions } from "./interactive-session-options.ts";
 import { chatAttachment, hasAgentInput, pathSafeIdentity, type RestoredChatMedia } from "./media-attachments.ts";
-import type { ApplicationSettingsState } from "./project-runtime.ts";
+import type { PrepareExplicitSkillMcpDependencies } from "./prepare-user-prompt.ts";
+import type { ApplicationSettingsState, ProjectServices } from "./project-runtime.ts";
 import { createSessionPresentation } from "./session-presentation.ts";
 import {
 	closeSessionRuntimes,
@@ -94,7 +97,12 @@ export interface RunInteractiveApplicationInput {
 	readonly skillsSnapshot: CodingSkillsSnapshot;
 	readonly mcpRegistry?: CodingMcpRegistry;
 	readonly skillsCommand: NonNullable<InteractiveSessionOptions["skillsCommand"]>;
+	readonly pluginsCommand: NonNullable<InteractiveSessionOptions["pluginsCommand"]>;
 	readonly mcpCommand: NonNullable<InteractiveSessionOptions["mcpCommand"]>;
+	readonly projectCapabilityCatalog: ProjectServices["capabilityCatalogSnapshot"];
+	readonly primarySkillMcpDependencyPreparation: PrepareExplicitSkillMcpDependencies;
+	readonly createSkillMcpDependencyPreparation: (sessionId: string) => PrepareExplicitSkillMcpDependencies;
+	readonly skillMcpDependencies: InteractiveSkillMcpDependencyHandler;
 	readonly hooksCommand: NonNullable<InteractiveSessionOptions["hooksCommand"]>;
 	readonly permissionsCommand: PermissionsCommand;
 	readonly commandRegistry: CommandRegistry;
@@ -105,7 +113,7 @@ export interface RunInteractiveApplicationInput {
 	readonly interactiveRuntime: PromptRuntime;
 	readonly mcpElicitation?: InteractiveMcpElicitationHandler;
 	readonly workspaceDiffs: WorkspaceDiffTracker;
-	readonly initialInput: AgentInput;
+	readonly initialInput: PreparedWorkInput;
 	readonly initialAttachmentIds: readonly string[];
 	readonly noAnimations: boolean;
 }
@@ -211,7 +219,10 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 				listModelEntries,
 				authCommand,
 				skillsCommand: input.skillsCommand,
+				pluginsCommand: input.pluginsCommand,
 				mcpCommand: input.mcpCommand,
+				projectCapabilityCatalog: input.projectCapabilityCatalog,
+				prepareSkillMcpDependencies: input.createSkillMcpDependencyPreparation(targetSession.descriptor.id),
 				hooksCommand: input.hooksCommand,
 				permissionsCommand: input.permissionsCommand,
 				reasoning: targetReasoning,
@@ -246,7 +257,10 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 		listModelEntries,
 		authCommand,
 		skillsCommand: input.skillsCommand,
+		pluginsCommand: input.pluginsCommand,
 		mcpCommand: input.mcpCommand,
+		projectCapabilityCatalog: input.projectCapabilityCatalog,
+		prepareSkillMcpDependencies: input.primarySkillMcpDependencyPreparation,
 		hooksCommand: input.hooksCommand,
 		permissionsCommand: input.permissionsCommand,
 		skillsManager: input.skillsManager,
@@ -273,6 +287,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			diagnostics: input.options.diagnostics,
 			fullScreenOutput: input.options.fullScreenOutput,
 			mcpElicitation: input.mcpElicitation,
+			skillMcpDependencies: input.skillMcpDependencies,
 			motion: input.noAnimations ? "reduced" : (settings.current.ui?.motion ?? "full"),
 			commandRegistry: input.commandRegistry,
 			fileMentionSearch,
@@ -332,7 +347,7 @@ export async function runInteractiveApplication(input: RunInteractiveApplication
 			workspace: input.workspace.root,
 			homePath: input.options.runtime.homeDirectory,
 			onWarning: (message) => input.options.io.stderr.write(`coda: ${message}\n`),
-			initialPrompt: hasAgentInput(input.initialInput) ? input.initialInput : undefined,
+			initialPrompt: hasAgentInput(input.initialInput.input) ? input.initialInput : undefined,
 			initialAttachmentIds: input.initialAttachmentIds,
 			initialAttachments,
 		});

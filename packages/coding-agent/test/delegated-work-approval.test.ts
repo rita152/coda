@@ -12,6 +12,7 @@ import { createNodeProcessRunner } from "../src/host/node-process-runner.ts";
 import type { ProcessSessionRunner } from "../src/host/process-runner.ts";
 import { createWorkspace } from "../src/host/workspace.ts";
 import type { CodingMcpRegistry } from "../src/mcp/registry.ts";
+import { mcpRunCapabilitySelections } from "../src/mcp/run-capability.ts";
 import { ProcessSessionManager } from "../src/process/process-session-manager.ts";
 import { createWorkspaceWorkCoordinator } from "../src/runtime/workspace-work-coordinator.ts";
 import { InMemorySessionManager } from "../src/session/memory-session-manager.ts";
@@ -86,7 +87,9 @@ describe("interactive delegated Work approval", () => {
 				fauxAssistantMessage("parent done", { timestamp: 10_000 }),
 			],
 		});
-		await expect(parent.prompt("delegate confirmation")).resolves.toMatchObject({ state: "succeeded" });
+		await expect(
+			parent.prompt("delegate confirmation", [], mcpRunCapabilitySelections(["mcp:ask:confirm"])),
+		).resolves.toMatchObject({ state: "succeeded" });
 		expect(answers).toEqual([{ action: "accept", content: { ok: true } }]);
 		await close();
 	});
@@ -160,11 +163,12 @@ function fakeElicitingRegistry(): CodingMcpRegistry {
 	const toolId = "mcp:ask:confirm";
 	const lease: McpToolLease = {
 		revision: 1,
-		servers: [{ id: "ask", status: "ready", toolCount: 1 }],
+		servers: [{ id: "ask", semanticName: "ask", status: "ready", toolCount: 1 }],
 		tools: [
 			{
 				id: toolId,
 				serverId: "ask",
+				serverSemanticName: "ask",
 				remoteName: "confirm",
 				name: "mcp__ask__confirm",
 				description: "Confirm",
@@ -184,7 +188,6 @@ function fakeElicitingRegistry(): CodingMcpRegistry {
 	return {
 		refresh: async () => undefined,
 		acquireTools: () => lease,
-		selectedToolIds: () => new Set([toolId]),
 	} as unknown as CodingMcpRegistry;
 }
 

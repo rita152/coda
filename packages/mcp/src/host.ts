@@ -110,10 +110,16 @@ function modelToolName(serverId: string, remoteName: string, maxLength: number):
 	return `${prefix}${normalized.slice(0, available)}${suffix}`;
 }
 
-function descriptor(serverId: string, remote: McpRemoteTool, limits: McpHostLimits): McpToolDescriptor {
+function descriptor(
+	serverId: string,
+	serverSemanticName: string,
+	remote: McpRemoteTool,
+	limits: McpHostLimits,
+): McpToolDescriptor {
 	return deepFreeze({
 		id: toolId(serverId, remote.name),
 		serverId,
+		serverSemanticName,
 		remoteName: remote.name,
 		name: modelToolName(serverId, remote.name, limits.maxModelToolNameCharacters),
 		...(remote.title ? { title: remote.title } : {}),
@@ -121,6 +127,7 @@ function descriptor(serverId: string, remote: McpRemoteTool, limits: McpHostLimi
 		inputSchema: structuredClone(remote.inputSchema),
 		...(remote.outputSchema ? { outputSchema: structuredClone(remote.outputSchema) } : {}),
 		...(remote.annotations ? { annotations: structuredClone(remote.annotations) } : {}),
+		...(remote.meta ? { meta: structuredClone(remote.meta) } : {}),
 	});
 }
 
@@ -162,6 +169,7 @@ function projectToolCatalog(
 			tools.delete(tool.descriptor.id);
 			collisionDiagnostics.push({
 				serverId: tool.descriptor.serverId,
+				serverSemanticName: tool.descriptor.serverSemanticName,
 				toolName: tool.descriptor.remoteName,
 				code: TOOL_NAME_COLLISION_CODE,
 				message: `Model Tool name "${name}" collides after normalization; every colliding Tool was quarantined`,
@@ -230,6 +238,9 @@ function validateDefinitions(definitions: readonly McpServerDefinition[]): void 
 	for (const definition of definitions) {
 		if (!SERVER_ID_PATTERN.test(definition.id)) {
 			throw new Error(`Invalid MCP Server id "${definition.id}"`);
+		}
+		if (definition.semanticName === "") {
+			throw new Error(`Invalid MCP Server semantic name "${definition.semanticName}"`);
 		}
 		if (ids.has(definition.id)) throw new Error(`Duplicate MCP Server id "${definition.id}"`);
 		ids.add(definition.id);
@@ -354,6 +365,7 @@ export function createMcpHost(options: {
 	const markUnavailable = (serverId: string, error?: Error, code = "mcp.server-unavailable"): void => {
 		const serverIndex = current.servers.findIndex((server) => server.id === serverId);
 		if (serverIndex < 0) return;
+		const semanticName = current.servers[serverIndex]!.semanticName;
 		const message = error?.message || "connection closed";
 		const unavailableConnection = connections.get(serverId);
 		connections.delete(serverId);
@@ -361,11 +373,13 @@ export function createMcpHost(options: {
 		dirtyServers.delete(serverId);
 		rememberUnavailableTools(serverId, message);
 		const serverStates = current.servers.map((server, index) =>
-			index === serverIndex ? { id: serverId, status: "degraded" as const, toolCount: 0, error: message } : server,
+			index === serverIndex
+				? { id: serverId, semanticName, status: "degraded" as const, toolCount: 0, error: message }
+				: server,
 		);
 		const projected = projectToolCatalog(catalogTools, [
 			...current.diagnostics.filter((diagnostic) => diagnostic.serverId !== serverId),
-			{ serverId, code, message },
+			{ serverId, serverSemanticName: semanticName, code, message },
 		]);
 		tools = projected.tools;
 		publish(
@@ -423,6 +437,7 @@ export function createMcpHost(options: {
 			if (admittedToolCount >= limits.maxToolsPerServer) {
 				diagnostics.push({
 					serverId: definition.id,
+					serverSemanticName: definition.semanticName ?? definition.id,
 					toolName: remote.name,
 					code: "mcp.tool-limit-exceeded",
 					message: `Server exceeds the ${limits.maxToolsPerServer} Tool limit`,
@@ -441,13 +456,14 @@ export function createMcpHost(options: {
 			} catch (error) {
 				diagnostics.push({
 					serverId: definition.id,
+					serverSemanticName: definition.semanticName ?? definition.id,
 					toolName: remote.name,
 					code: "mcp.tool-invalid-schema",
 					message: error instanceof Error ? error.message : String(error),
 				});
 				continue;
 			}
-			const nextDescriptor = descriptor(definition.id, remote, limits);
+			const nextDescriptor = descriptor(definition.id, definition.semanticName ?? definition.id, remote, limits);
 			if (target.has(nextDescriptor.id)) throw new Error(`Duplicate MCP Tool identity "${nextDescriptor.id}"`);
 			target.set(nextDescriptor.id, {
 				descriptor: nextDescriptor,
@@ -526,7 +542,12 @@ export function createMcpHost(options: {
 					for (const definition of definitions) {
 						nextDefinitions.set(definition.id, definition);
 						if (definition.enabled === false) {
-							serverSnapshots.push({ id: definition.id, status: "disabled", toolCount: 0 });
+							serverSnapshots.push({
+								id: definition.id,
+								semanticName: definition.semanticName ?? definition.id,
+								status: "disabled",
+								toolCount: 0,
+							});
 							continue;
 						}
 						let connection: McpConnection | undefined;
@@ -543,6 +564,7 @@ export function createMcpHost(options: {
 							diagnostics.push(...admission.diagnostics);
 							serverSnapshots.push({
 								id: definition.id,
+								semanticName: definition.semanticName ?? definition.id,
 								status: "ready",
 								protocolEra: connection.info.protocolEra,
 								protocolVersion: connection.info.protocolVersion,
@@ -557,12 +579,14 @@ export function createMcpHost(options: {
 							const message = error instanceof Error ? error.message : String(error);
 							serverSnapshots.push({
 								id: definition.id,
+								semanticName: definition.semanticName ?? definition.id,
 								status: "degraded",
 								toolCount: 0,
 								error: message,
 							});
 							diagnostics.push({
 								serverId: definition.id,
+								serverSemanticName: definition.semanticName ?? definition.id,
 								code: phase === "catalog" ? "mcp.server-invalid-catalog" : "mcp.server-unavailable",
 								message,
 							});
@@ -627,6 +651,7 @@ export function createMcpHost(options: {
 						if (index >= 0) {
 							nextServers[index] = {
 								id: serverId,
+								semanticName: definition.semanticName ?? definition.id,
 								status: "ready",
 								protocolEra: connection.info.protocolEra,
 								protocolVersion: connection.info.protocolVersion,
@@ -644,11 +669,19 @@ export function createMcpHost(options: {
 						}
 						nextDiagnostics.push({
 							serverId,
+							serverSemanticName: definition.semanticName ?? definition.id,
 							code: phase === "catalog" ? "mcp.server-invalid-catalog" : "mcp.server-unavailable",
 							message,
 						});
-						if (index >= 0)
-							nextServers[index] = { id: serverId, status: "degraded", toolCount: 0, error: message };
+						if (index >= 0) {
+							nextServers[index] = {
+								id: serverId,
+								semanticName: definition.semanticName ?? definition.id,
+								status: "degraded",
+								toolCount: 0,
+								error: message,
+							};
+						}
 					}
 					dirtyServers.delete(serverId);
 				}
@@ -693,6 +726,7 @@ export function createMcpHost(options: {
 						server.id === serverId
 							? {
 									id: serverId,
+									semanticName: definition.semanticName ?? definition.id,
 									status: "ready" as const,
 									protocolEra: connection!.info.protocolEra,
 									protocolVersion: connection!.info.protocolVersion,

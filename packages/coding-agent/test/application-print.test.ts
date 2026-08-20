@@ -848,7 +848,7 @@ describe("Coding Agent print mode", () => {
 			faux.setResponses([
 				(context) => {
 					const messages = JSON.stringify(context.messages);
-					expect(messages).toContain("BEGIN USER-SELECTED SKILL CONTEXT");
+					expect(messages).toContain("<skill>");
 					expect(messages).toContain("Follow the inspection checklist");
 					expect(messages).toContain("do the work");
 					expect(messages).not.toContain("$inspect");
