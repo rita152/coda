@@ -150,7 +150,7 @@ export class ChatTimelineRenderer {
 				const group = [entry];
 				while (index + 1 < entries.length) {
 					const candidate = entries[index + 1];
-					if (candidate?.kind !== "tool" || !isExplorationTool(candidate) || candidate.turnId !== entry.turnId) {
+					if (candidate?.kind !== "tool" || !isExplorationTool(candidate)) {
 						break;
 					}
 					group.push(candidate);

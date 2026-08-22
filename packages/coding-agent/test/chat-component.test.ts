@@ -703,6 +703,319 @@ describe("ChatComponent terminal input", () => {
 		expect(transcript).toContain("✓ Read a.ts");
 	});
 
+	it("merges consecutive exploration tool invocations across turns into one Explored block", () => {
+		const component = createComponent({ colorLevel: 0 });
+
+		// Turn 1: Read mod.rs
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-1",
+				attemptId: "attempt-1",
+				message: {
+					id: "message-1",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/workspace/mod.rs" } }],
+					},
+				},
+			}),
+		);
+		const invocation1 = {
+			id: "tool-1",
+			resultMessageId: "result-1",
+			providerToolCallId: "call-1",
+			toolName: "read",
+			arguments: { path: "src/workspace/mod.rs" },
+			sourceIndex: 0,
+		};
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-1", invocation: invocation1 }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-1",
+				invocation: invocation1,
+				outcome: "success",
+				result: {
+					id: "result-1",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-1",
+						toolName: "read",
+						content: [{ type: "text", text: "mod" }],
+						timestamp: 1,
+					},
+				},
+			}),
+		);
+
+		let rendered = stripAnsi(component.render({ width: 60, height: 20, now: 1 }).join("\n"));
+		expect(rendered).toContain("• Explored\n  └ Read src/workspace/mod.rs");
+		expect(rendered.match(/• Explored/g)?.length).toBe(1);
+
+		// Turn 2: Read chrome.rs and sidebar.rs (temporally next turn)
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-2",
+				attemptId: "attempt-2",
+				message: {
+					id: "message-2",
+					message: {
+						role: "assistant",
+						content: [
+							{ type: "toolCall", id: "call-2", name: "read", arguments: { path: "src/workspace/chrome.rs" } },
+							{ type: "toolCall", id: "call-3", name: "read", arguments: { path: "src/workspace/sidebar.rs" } },
+						],
+					},
+				},
+			}),
+		);
+		const invocation2 = {
+			id: "tool-2",
+			resultMessageId: "result-2",
+			providerToolCallId: "call-2",
+			toolName: "read",
+			arguments: { path: "src/workspace/chrome.rs" },
+			sourceIndex: 0,
+		};
+		const invocation3 = {
+			id: "tool-3",
+			resultMessageId: "result-3",
+			providerToolCallId: "call-3",
+			toolName: "read",
+			arguments: { path: "src/workspace/sidebar.rs" },
+			sourceIndex: 1,
+		};
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-2", invocation: invocation2 }));
+		rendered = stripAnsi(component.render({ width: 60, height: 20, now: 2 }).join("\n"));
+		expect(rendered).toContain("• Exploring\n  └ Read src/workspace/mod.rs\n    Read src/workspace/chrome.rs");
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-2",
+				invocation: invocation2,
+				outcome: "success",
+				result: {
+					id: "result-2",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-2",
+						toolName: "read",
+						content: [{ type: "text", text: "chrome" }],
+						timestamp: 2,
+					},
+				},
+			}),
+		);
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-2", invocation: invocation3 }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-2",
+				invocation: invocation3,
+				outcome: "success",
+				result: {
+					id: "result-3",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-3",
+						toolName: "read",
+						content: [{ type: "text", text: "sidebar" }],
+						timestamp: 2,
+					},
+				},
+			}),
+		);
+
+		rendered = stripAnsi(component.render({ width: 60, height: 20, now: 2 }).join("\n"));
+		expect(rendered).toContain(
+			"• Explored\n  └ Read src/workspace/mod.rs\n    Read src/workspace/chrome.rs\n    Read src/workspace/sidebar.rs",
+		);
+		expect(rendered.match(/• Explored/g)?.length).toBe(1);
+
+		// Turn 3: Read events.rs and transcript.rs
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-3",
+				attemptId: "attempt-3",
+				message: {
+					id: "message-3",
+					message: {
+						role: "assistant",
+						content: [
+							{ type: "toolCall", id: "call-4", name: "read", arguments: { path: "src/workspace/events.rs" } },
+							{ type: "toolCall", id: "call-5", name: "read", arguments: { path: "src/workspace/transcript.rs" } },
+						],
+					},
+				},
+			}),
+		);
+		const invocation4 = {
+			id: "tool-4",
+			resultMessageId: "result-4",
+			providerToolCallId: "call-4",
+			toolName: "read",
+			arguments: { path: "src/workspace/events.rs" },
+			sourceIndex: 0,
+		};
+		const invocation5 = {
+			id: "tool-5",
+			resultMessageId: "result-5",
+			providerToolCallId: "call-5",
+			toolName: "read",
+			arguments: { path: "src/workspace/transcript.rs" },
+			sourceIndex: 1,
+		};
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-3", invocation: invocation4 }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-3",
+				invocation: invocation4,
+				outcome: "success",
+				result: {
+					id: "result-4",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-4",
+						toolName: "read",
+						content: [{ type: "text", text: "events" }],
+						timestamp: 3,
+					},
+				},
+			}),
+		);
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-3", invocation: invocation5 }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-3",
+				invocation: invocation5,
+				outcome: "success",
+				result: {
+					id: "result-5",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-5",
+						toolName: "read",
+						content: [{ type: "text", text: "transcript" }],
+						timestamp: 3,
+					},
+				},
+			}),
+		);
+
+		rendered = stripAnsi(component.render({ width: 60, height: 20, now: 3 }).join("\n"));
+		expect(rendered).toContain(
+			"• Explored\n  └ Read src/workspace/mod.rs\n    Read src/workspace/chrome.rs\n    Read src/workspace/sidebar.rs\n    Read src/workspace/events.rs\n    Read src/workspace/transcript.rs",
+		);
+		expect(rendered.match(/• Explored/g)?.length).toBe(1);
+
+		// Turn 4: Non-exploration tool (edit) creates a separate block
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-4",
+				attemptId: "attempt-4",
+				message: {
+					id: "message-4",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "call-6",
+								name: "edit",
+								arguments: { path: "src/workspace/mod.rs", oldText: "a", newText: "b" },
+							},
+						],
+					},
+				},
+			}),
+		);
+		const invocation6 = {
+			id: "tool-6",
+			resultMessageId: "result-6",
+			providerToolCallId: "call-6",
+			toolName: "edit",
+			arguments: { path: "src/workspace/mod.rs", oldText: "a", newText: "b" },
+			sourceIndex: 0,
+		};
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-4", invocation: invocation6 }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-4",
+				invocation: invocation6,
+				outcome: "success",
+				result: {
+					id: "result-6",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-6",
+						toolName: "edit",
+						content: [{ type: "text", text: "ok" }],
+						timestamp: 4,
+					},
+				},
+			}),
+		);
+
+		rendered = stripAnsi(component.render({ width: 60, height: 20, now: 4 }).join("\n"));
+		expect(rendered).toContain("• Edited src/workspace/mod.rs");
+		expect(rendered.match(/• Explored/g)?.length).toBe(1);
+
+		// Turn 5: Subsequent exploration creates a new Explored block after the edit
+		component.accept(
+			event({
+				type: "message_end",
+				turnId: "turn-5",
+				attemptId: "attempt-5",
+				message: {
+					id: "message-5",
+					message: {
+						role: "assistant",
+						content: [
+							{ type: "toolCall", id: "call-7", name: "read", arguments: { path: "src/workspace/mod.rs" } },
+						],
+					},
+				},
+			}),
+		);
+		const invocation7 = {
+			id: "tool-7",
+			resultMessageId: "result-7",
+			providerToolCallId: "call-7",
+			toolName: "read",
+			arguments: { path: "src/workspace/mod.rs" },
+			sourceIndex: 0,
+		};
+		component.accept(event({ type: "tool_execution_start", turnId: "turn-5", invocation: invocation7 }));
+		component.accept(
+			event({
+				type: "tool_execution_end",
+				turnId: "turn-5",
+				invocation: invocation7,
+				outcome: "success",
+				result: {
+					id: "result-7",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-7",
+						toolName: "read",
+						content: [{ type: "text", text: "mod again" }],
+						timestamp: 5,
+					},
+				},
+			}),
+		);
+
+		rendered = stripAnsi(component.render({ width: 60, height: 40, now: 5 }).join("\n"));
+		expect(rendered.match(/• Explored/g)?.length).toBe(2);
+	});
+
 	it("renders a submitted multiline User Prompt in a muted border card without a label", () => {
 		const component = createComponent({ colorLevel: 0 });
 		component.accept(

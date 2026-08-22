@@ -79,7 +79,7 @@ Renderable Modules receive an immutable `{ width, height, now }` context. A sing
 - Main Timeline uses a borderless tree with a state bullet, bold action word, dim gutter and result text, and code-styled command text. Transcript View retains its existing success/failure glyphs and detail layout.
 - Action language is Reading/Read, Searching/Searched, Editing/Edited, Writing/Wrote, Running/Ran, and Exploring/Explored.
 - States are awaiting input, running, success, failed, aborted, skipped, and interrupted. Interrupted states state that side effects are unknown.
-- One or more consecutive read, grep, find, and ls invocations in one Turn form an Exploring/Explored group without losing child identity, order, concurrency, or error state. The group uses one dim branch followed by aligned Read, List, and Search actions.
+- One or more consecutive read, grep, find, and ls invocations form an Exploring/Explored group without losing child identity, order, concurrency, or error state. Successive exploration calls across turns are appended to the same group. The group uses one dim branch followed by aligned Read, List, and Search actions.
 - Preview output is at most five display rows, preserving head and tail with an omitted-row marker and the Codex-aligned `ctrl + t to view transcript` hint. Transcript View shows the complete normalized model-visible result, not raw Provider payloads or hidden overflow data.
 - Tool text is stripped of ANSI, OSC, C0, and C1 controls before presentation.
 - read/grep/find/ls render compact path/query/count/truncation summaries; edit renders a bounded before/after diff; write renders operation/path/bytes; bash renders command, bounded output, exit/signal/timeout/truncation, and duration.
